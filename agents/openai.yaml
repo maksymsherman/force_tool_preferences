@@ -1,0 +1,7 @@
+interface:
+  display_name: "Force uv"
+  short_description: "Enforce uv-first Python commands"
+  default_prompt: "Use $force-uv to replace bare python or pip commands with uv-safe project workflows."
+
+policy:
+  allow_implicit_invocation: true
