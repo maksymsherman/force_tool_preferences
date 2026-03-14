@@ -6,6 +6,19 @@ use std::time::Instant;
 const PYTHON_MESSAGE: &str = "Use uv instead of bare Python or pip commands in this project. Replace the blocked command with 'uv run ...', 'uv add ...', 'uv add --dev ...', 'uv remove ...', or 'uv run --with ...' as appropriate.";
 const UV_INIT_MESSAGE: &str = "Do not run 'uv init' in an existing project unless the user explicitly asks for project creation or conversion. Inspect the repo first and prefer 'uv run', 'uv add', 'uv sync', or 'uv run --with'. If project initialization is truly needed, use 'uv init --no-readme --no-workspace' to avoid overwriting existing files and git history.";
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BlockDecision {
+    message: String,
+}
+
+impl BlockDecision {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
 fn main() {
     let exit_code = match run() {
         Ok(code) => code,
@@ -30,15 +43,15 @@ fn run() -> Result<i32, String> {
             };
 
             match evaluate_command(raw.trim()) {
-                Some(reason) if claude_json => {
+                Some(decision) if claude_json => {
                     println!(
                         "{{\"decision\":\"block\",\"reason\":\"{}\"}}",
-                        escape_json(reason)
+                        escape_json(&decision.message)
                     );
                     Ok(0)
                 }
-                Some(reason) => {
-                    eprintln!("{reason}");
+                Some(decision) => {
+                    eprintln!("{}", decision.message);
                     Ok(2)
                 }
                 None => Ok(0),
@@ -203,30 +216,46 @@ fn escape_json(value: &str) -> String {
     escaped
 }
 
-fn evaluate_command(command: &str) -> Option<&'static str> {
+fn evaluate_command(command: &str) -> Option<BlockDecision> {
+    for segment in parse_segments(command) {
+        if let Some(decision) = evaluate_segment(&segment.tokens) {
+            return Some(decision);
+        }
+    }
+
+    None
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ParsedToken {
+    raw: String,
+    value: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ParsedSegment {
+    tokens: Vec<ParsedToken>,
+}
+
+fn parse_segments(command: &str) -> Vec<ParsedSegment> {
     let bytes = command.as_bytes();
-    let mut token = Vec::with_capacity(32);
-    let mut state = SegmentState::SeekCommand;
+    let mut segments = Vec::new();
+    let mut tokens = Vec::new();
+    let mut raw = Vec::with_capacity(32);
+    let mut value = Vec::with_capacity(32);
     let mut in_single_quote = false;
     let mut in_double_quote = false;
-    let mut escape_next = false;
     let mut index = 0usize;
 
     while index < bytes.len() {
         let byte = bytes[index];
 
-        if escape_next {
-            token.push(byte);
-            escape_next = false;
-            index += 1;
-            continue;
-        }
-
         if in_single_quote {
+            raw.push(byte);
             if byte == b'\'' {
                 in_single_quote = false;
             } else {
-                token.push(byte);
+                value.push(byte);
             }
             index += 1;
             continue;
@@ -234,126 +263,414 @@ fn evaluate_command(command: &str) -> Option<&'static str> {
 
         if in_double_quote {
             match byte {
-                b'"' => in_double_quote = false,
-                b'\\' => escape_next = true,
-                _ => token.push(byte),
+                b'"' => {
+                    raw.push(byte);
+                    in_double_quote = false;
+                }
+                b'\\' => {
+                    raw.push(byte);
+                    if index + 1 < bytes.len() {
+                        index += 1;
+                        raw.push(bytes[index]);
+                        value.push(bytes[index]);
+                    } else {
+                        value.push(b'\\');
+                    }
+                }
+                _ => {
+                    raw.push(byte);
+                    value.push(byte);
+                }
             }
             index += 1;
             continue;
         }
 
         match byte {
-            b' ' | b'\n' | b'\r' | b'\t' => {
-                if let Some(reason) = flush_token(&mut token, &mut state) {
-                    return Some(reason);
-                }
+            b' ' | b'\n' | b'\r' | b'\t' => flush_parsed_token(&mut raw, &mut value, &mut tokens),
+            b'\'' => {
+                raw.push(byte);
+                in_single_quote = true;
             }
-            b'\'' => in_single_quote = true,
-            b'"' => in_double_quote = true,
+            b'"' => {
+                raw.push(byte);
+                in_double_quote = true;
+            }
             b';' => {
-                if let Some(reason) = flush_token(&mut token, &mut state) {
-                    return Some(reason);
-                }
-                state = SegmentState::SeekCommand;
+                flush_parsed_token(&mut raw, &mut value, &mut tokens);
+                flush_segment(&mut tokens, &mut segments);
             }
-            b'|' => {
-                if let Some(reason) = flush_token(&mut token, &mut state) {
-                    return Some(reason);
-                }
-                if index + 1 < bytes.len() && bytes[index + 1] == b'|' {
+            b'|' | b'&' => {
+                flush_parsed_token(&mut raw, &mut value, &mut tokens);
+                flush_segment(&mut tokens, &mut segments);
+                if index + 1 < bytes.len() && bytes[index + 1] == byte {
                     index += 1;
                 }
-                state = SegmentState::SeekCommand;
-            }
-            b'&' => {
-                if let Some(reason) = flush_token(&mut token, &mut state) {
-                    return Some(reason);
-                }
-                if index + 1 < bytes.len() && bytes[index + 1] == b'&' {
-                    index += 1;
-                }
-                state = SegmentState::SeekCommand;
             }
             b'\\' => {
+                raw.push(byte);
                 if index + 1 < bytes.len() {
                     index += 1;
-                    token.push(bytes[index]);
+                    raw.push(bytes[index]);
+                    value.push(bytes[index]);
                 } else {
-                    token.push(b'\\');
+                    value.push(b'\\');
                 }
             }
-            _ => token.push(byte),
+            _ => {
+                raw.push(byte);
+                value.push(byte);
+            }
         }
 
         index += 1;
     }
 
-    flush_token(&mut token, &mut state)
+    flush_parsed_token(&mut raw, &mut value, &mut tokens);
+    flush_segment(&mut tokens, &mut segments);
+    segments
 }
 
-fn flush_token(token: &mut Vec<u8>, state: &mut SegmentState) -> Option<&'static str> {
-    if token.is_empty() {
-        return None;
+fn flush_parsed_token(raw: &mut Vec<u8>, value: &mut Vec<u8>, tokens: &mut Vec<ParsedToken>) {
+    if raw.is_empty() {
+        return;
     }
 
-    let reason = process_token(token, state);
-    token.clear();
-    reason
+    tokens.push(ParsedToken {
+        raw: String::from_utf8_lossy(raw).into_owned(),
+        value: String::from_utf8_lossy(value).into_owned(),
+    });
+    raw.clear();
+    value.clear();
+}
+
+fn flush_segment(tokens: &mut Vec<ParsedToken>, segments: &mut Vec<ParsedSegment>) {
+    if tokens.is_empty() {
+        return;
+    }
+
+    segments.push(ParsedSegment {
+        tokens: std::mem::take(tokens),
+    });
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SegmentState {
     SeekCommand,
     SeekUvDecision,
-    IgnoreSegment,
 }
 
-fn process_token(token: &[u8], state: &mut SegmentState) -> Option<&'static str> {
-    match state {
-        SegmentState::SeekCommand => process_command_token(token, state),
-        SegmentState::SeekUvDecision => process_uv_token(token, state),
-        SegmentState::IgnoreSegment => None,
-    }
-}
+fn evaluate_segment(tokens: &[ParsedToken]) -> Option<BlockDecision> {
+    let mut state = SegmentState::SeekCommand;
+    let mut wrapper = None;
+    let mut skip_next_value = false;
 
-fn process_command_token(token: &[u8], state: &mut SegmentState) -> Option<&'static str> {
-    if token.starts_with(b"-") || is_shell_assignment(token) {
-        return None;
-    }
+    for (index, token) in tokens.iter().enumerate() {
+        let value = token.value.as_bytes();
 
-    match classify_token(token) {
-        TokenKind::Wrapper => None,
-        TokenKind::Uv => {
-            *state = SegmentState::SeekUvDecision;
-            None
+        if skip_next_value {
+            skip_next_value = false;
+            continue;
         }
-        TokenKind::Uvx => {
-            *state = SegmentState::IgnoreSegment;
-            None
+
+        match state {
+            SegmentState::SeekCommand => {
+                if value.starts_with(b"-") {
+                    if let Some(wrapper_kind) = wrapper {
+                        skip_next_value = wrapper_option_takes_value(wrapper_kind, value);
+                    }
+                    continue;
+                }
+
+                if is_shell_assignment(value) {
+                    continue;
+                }
+
+                match classify_token(value) {
+                    TokenKind::Wrapper => {
+                        wrapper = wrapper_kind(value);
+                    }
+                    TokenKind::Uv => {
+                        state = SegmentState::SeekUvDecision;
+                        wrapper = None;
+                    }
+                    TokenKind::Uvx | TokenKind::Other => return None,
+                    TokenKind::PythonLike => return Some(build_python_decision(tokens, index)),
+                    TokenKind::PipLike => return Some(build_pip_decision(tokens, index)),
+                }
+            }
+            SegmentState::SeekUvDecision => {
+                if value.starts_with(b"-") {
+                    skip_next_value = uv_option_takes_value(value);
+                    continue;
+                }
+
+                if is_shell_assignment(value) {
+                    continue;
+                }
+
+                let name = normalized_program_name(value);
+                if name == b"init" {
+                    return Some(BlockDecision::new(UV_INIT_MESSAGE));
+                }
+
+                if is_known_safe_uv_subcommand(name) {
+                    return None;
+                }
+
+                return None;
+            }
         }
-        TokenKind::PythonLike | TokenKind::PipLike => Some(PYTHON_MESSAGE),
-        TokenKind::Other => {
-            *state = SegmentState::IgnoreSegment;
-            None
-        }
-    }
-}
-
-fn process_uv_token(token: &[u8], state: &mut SegmentState) -> Option<&'static str> {
-    if token.starts_with(b"-") || is_shell_assignment(token) {
-        return None;
-    }
-
-    let name = normalized_program_name(token);
-    if name == b"init" {
-        return Some(UV_INIT_MESSAGE);
-    }
-
-    if is_known_safe_uv_subcommand(name) {
-        *state = SegmentState::IgnoreSegment;
     }
 
     None
+}
+
+fn build_python_decision(tokens: &[ParsedToken], command_index: usize) -> BlockDecision {
+    let suggestion = insert_before_command(tokens, command_index, &["uv", "run"]);
+    BlockDecision::new(format_exact_suggestion(PYTHON_MESSAGE, &suggestion))
+}
+
+fn build_pip_decision(tokens: &[ParsedToken], command_index: usize) -> BlockDecision {
+    let pip_rewrite = replace_command(tokens, command_index, 1, &["uv", "pip"]);
+    let Some(subcommand) = tokens
+        .get(command_index + 1)
+        .map(|token| token.value.as_str())
+    else {
+        return BlockDecision::new(format_exact_suggestion(PYTHON_MESSAGE, &pip_rewrite));
+    };
+
+    if subcommand.eq_ignore_ascii_case("install") {
+        return build_pip_install_decision(tokens, command_index, pip_rewrite);
+    }
+
+    if subcommand.eq_ignore_ascii_case("uninstall") {
+        return build_pip_uninstall_decision(tokens, command_index, pip_rewrite);
+    }
+
+    BlockDecision::new(format_exact_suggestion(PYTHON_MESSAGE, &pip_rewrite))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WrapperKind {
+    Sudo,
+    Env,
+    Command,
+    Time,
+    Nohup,
+    Builtin,
+}
+
+fn wrapper_kind(token: &[u8]) -> Option<WrapperKind> {
+    match normalized_program_name(token) {
+        b"sudo" => Some(WrapperKind::Sudo),
+        b"env" => Some(WrapperKind::Env),
+        b"command" => Some(WrapperKind::Command),
+        b"time" => Some(WrapperKind::Time),
+        b"nohup" => Some(WrapperKind::Nohup),
+        b"builtin" => Some(WrapperKind::Builtin),
+        _ => None,
+    }
+}
+
+fn wrapper_option_takes_value(kind: WrapperKind, token: &[u8]) -> bool {
+    match kind {
+        WrapperKind::Sudo => matches!(
+            token,
+            b"-u"
+                | b"--user"
+                | b"-g"
+                | b"--group"
+                | b"-h"
+                | b"--host"
+                | b"-p"
+                | b"--prompt"
+                | b"-R"
+                | b"--chroot"
+                | b"-D"
+                | b"--chdir"
+                | b"-C"
+                | b"--close-from"
+                | b"-T"
+                | b"--command-timeout"
+        ),
+        WrapperKind::Env => matches!(
+            token,
+            b"-u" | b"--unset" | b"-C" | b"--chdir" | b"-S" | b"--split-string" | b"--argv0"
+        ),
+        WrapperKind::Command | WrapperKind::Time | WrapperKind::Nohup | WrapperKind::Builtin => {
+            false
+        }
+    }
+}
+
+fn uv_option_takes_value(token: &[u8]) -> bool {
+    matches!(
+        token,
+        b"--directory"
+            | b"--project"
+            | b"--config-file"
+            | b"--cache-dir"
+            | b"--python"
+            | b"--index"
+            | b"--default-index"
+            | b"--extra-index-url"
+            | b"--find-links"
+            | b"--index-url"
+    )
+}
+
+fn build_pip_install_decision(
+    tokens: &[ParsedToken],
+    command_index: usize,
+    pip_rewrite: String,
+) -> BlockDecision {
+    let dependency_args = &tokens[command_index + 2..];
+    if is_high_confidence_dependency_list(dependency_args) {
+        let project_rewrite = replace_command(tokens, command_index, 2, &["uv", "add"]);
+        return BlockDecision::new(format_alternative_suggestions(
+            PYTHON_MESSAGE,
+            &[project_rewrite, pip_rewrite],
+            Some("Choose `uv add` for project dependencies; choose `uv pip` to keep pip-style behavior."),
+        ));
+    }
+
+    BlockDecision::new(format_exact_suggestion_with_note(
+        PYTHON_MESSAGE,
+        &pip_rewrite,
+        "Use `uv add ...` only when you intentionally want to modify project dependencies.",
+    ))
+}
+
+fn build_pip_uninstall_decision(
+    tokens: &[ParsedToken],
+    command_index: usize,
+    pip_rewrite: String,
+) -> BlockDecision {
+    let dependency_args = &tokens[command_index + 2..];
+    if is_high_confidence_dependency_list(dependency_args) {
+        let project_rewrite = replace_command(tokens, command_index, 2, &["uv", "remove"]);
+        return BlockDecision::new(format_alternative_suggestions(
+            PYTHON_MESSAGE,
+            &[project_rewrite, pip_rewrite],
+            Some("Choose `uv remove` when the package belongs in project metadata; choose `uv pip` for pip-style environment changes."),
+        ));
+    }
+
+    BlockDecision::new(format_exact_suggestion_with_note(
+        PYTHON_MESSAGE,
+        &pip_rewrite,
+        "Use `uv remove ...` only when you intentionally want to update project dependencies.",
+    ))
+}
+
+fn insert_before_command(
+    tokens: &[ParsedToken],
+    command_index: usize,
+    inserted: &[&str],
+) -> String {
+    let mut parts = Vec::with_capacity(tokens.len() + inserted.len());
+    parts.extend(
+        tokens[..command_index]
+            .iter()
+            .map(|token| token.raw.clone()),
+    );
+    parts.extend(inserted.iter().map(|item| (*item).to_string()));
+    parts.extend(
+        tokens[command_index..]
+            .iter()
+            .map(|token| token.raw.clone()),
+    );
+    parts.join(" ")
+}
+
+fn replace_command(
+    tokens: &[ParsedToken],
+    command_index: usize,
+    consumed: usize,
+    replacement: &[&str],
+) -> String {
+    let mut parts = Vec::with_capacity(tokens.len() + replacement.len());
+    parts.extend(
+        tokens[..command_index]
+            .iter()
+            .map(|token| token.raw.clone()),
+    );
+    parts.extend(replacement.iter().map(|item| (*item).to_string()));
+    parts.extend(
+        tokens[command_index + consumed..]
+            .iter()
+            .map(|token| token.raw.clone()),
+    );
+    parts.join(" ")
+}
+
+fn format_exact_suggestion(base: &str, suggestion: &str) -> String {
+    format!("{base}\nSuggested replacement:\n  {suggestion}")
+}
+
+fn format_exact_suggestion_with_note(base: &str, suggestion: &str, note: &str) -> String {
+    let mut message = format_exact_suggestion(base, suggestion);
+    message.push('\n');
+    message.push_str(note);
+    message
+}
+
+fn format_alternative_suggestions(
+    base: &str,
+    suggestions: &[String],
+    note: Option<&str>,
+) -> String {
+    let mut message = String::from(base);
+
+    if suggestions.len() == 1 {
+        message.push_str("\nSuggested replacement:\n  ");
+        message.push_str(&suggestions[0]);
+    } else if !suggestions.is_empty() {
+        message.push_str("\nLikely alternatives:");
+        for suggestion in suggestions {
+            message.push_str("\n  ");
+            message.push_str(suggestion);
+        }
+    }
+
+    if let Some(note) = note {
+        message.push('\n');
+        message.push_str(note);
+    }
+
+    message
+}
+
+fn is_high_confidence_dependency_list(tokens: &[ParsedToken]) -> bool {
+    !tokens.is_empty()
+        && tokens
+            .iter()
+            .all(|token| is_high_confidence_dependency_arg(&token.value))
+}
+
+fn is_high_confidence_dependency_arg(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('-')
+        && value.bytes().all(|byte| {
+            matches!(
+                byte,
+                b'a'..=b'z'
+                    | b'A'..=b'Z'
+                    | b'0'..=b'9'
+                    | b'.'
+                    | b'_'
+                    | b'-'
+                    | b'['
+                    | b']'
+                    | b','
+                    | b'='
+                    | b'<'
+                    | b'>'
+                    | b'!'
+                    | b'~'
+            )
+        })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -795,17 +1112,43 @@ impl<'a> JsonParser<'a> {
 mod tests {
     use super::*;
 
+    fn decision_message(command: &str) -> String {
+        evaluate_command(command).unwrap().message
+    }
+
     #[test]
-    fn blocks_python_command() {
-        assert_eq!(evaluate_command("python -m pytest"), Some(PYTHON_MESSAGE));
-        assert_eq!(
-            evaluate_command(".venv/bin/python script.py"),
-            Some(PYTHON_MESSAGE)
-        );
-        assert_eq!(
-            evaluate_command("pip install requests"),
-            Some(PYTHON_MESSAGE)
-        );
+    fn suggests_exact_python_rewrites() {
+        let message = decision_message("python -m pytest");
+        assert!(message.contains(PYTHON_MESSAGE));
+        assert!(message.contains("uv run python -m pytest"));
+
+        let quoted = decision_message(r#"python -c "print(\"ok\")""#);
+        assert!(quoted.contains(r#"uv run python -c "print(\"ok\")""#));
+
+        let wrapped = decision_message("sudo env FOO=1 python script.py");
+        assert!(wrapped.contains("sudo env FOO=1 uv run python script.py"));
+
+        let sudo_with_value = decision_message("sudo -u root python script.py");
+        assert!(sudo_with_value.contains("sudo -u root uv run python script.py"));
+    }
+
+    #[test]
+    fn suggests_confidence_graded_pip_rewrites() {
+        let install = decision_message("pip install requests");
+        assert!(install.contains("Likely alternatives:"));
+        assert!(install.contains("uv add requests"));
+        assert!(install.contains("uv pip install requests"));
+
+        let install_requirements = decision_message("pip install -r requirements.txt");
+        assert!(install_requirements.contains("uv pip install -r requirements.txt"));
+        assert!(!install_requirements.contains("uv add requirements.txt"));
+
+        let uninstall = decision_message("pip uninstall black");
+        assert!(uninstall.contains("uv remove black"));
+        assert!(uninstall.contains("uv pip uninstall black"));
+
+        let listing = decision_message("pip list --format=json");
+        assert!(listing.contains("uv pip list --format=json"));
     }
 
     #[test]
@@ -818,10 +1161,10 @@ mod tests {
 
     #[test]
     fn blocks_uv_init() {
-        assert_eq!(evaluate_command("uv init"), Some(UV_INIT_MESSAGE));
+        assert_eq!(decision_message("uv init"), UV_INIT_MESSAGE);
         assert_eq!(
-            evaluate_command("uv --directory repo init"),
-            Some(UV_INIT_MESSAGE)
+            decision_message("uv --directory repo init"),
+            UV_INIT_MESSAGE
         );
     }
 
