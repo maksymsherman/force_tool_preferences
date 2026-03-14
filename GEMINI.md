@@ -1,11 +1,31 @@
 # Force uv
 
-Use `uv` as the default Python interface in this repository.
+Use `uv` as the default interface for Python execution and dependency management. Replace bare Python and pip commands with the least invasive `uv` equivalent.
+
+## Rules
 
 - Never run bare `python`, `python3`, `pip`, or `pip3`.
-- Prefer `uv run ...` for Python execution and project tools.
-- Prefer `uv add`, `uv add --dev`, `uv remove`, and `uv sync` for dependency and environment changes.
-- Treat `uv init` as opt-in project creation only. Do not run it in this repo unless the user explicitly asks for that conversion.
-- Prefer the least invasive option, especially in a non-empty or version-controlled directory.
+- Prefer `uv run ...` for scripts, modules, tests, and ad hoc Python execution.
+- Prefer `uv add` / `uv add --dev` for dependencies and `uv remove` to uninstall.
+- Prefer `uv sync` to realize an existing `pyproject.toml` and `uv.lock`.
+- Prefer `uv run --with PKG ...` for one-off tools that should not touch project metadata.
+- Use `uvx` only for isolated CLI tools when project dependencies are irrelevant.
+- Never run `uv init` in an existing repo unless the user explicitly asks for project creation or conversion.
+- Never rewrite `pyproject.toml`, `uv.lock`, `.python-version`, or virtualenv settings just to satisfy a one-off command.
 
-Read `SKILL.md` for the full workflow and `references/uv-quick-reference.md` before making metadata changes.
+## Command mapping
+
+- `python script.py` -> `uv run python script.py`
+- `python -m pytest` -> `uv run pytest`
+- `python -m http.server` -> `uv run python -m http.server`
+- `python -c "..."` -> `uv run python -c "..."`
+- `pip install requests` -> `uv add requests`
+- `pip install pytest ruff --dev` -> `uv add --dev pytest ruff`
+- `pip uninstall requests` -> `uv remove requests`
+
+## Workflow
+
+1. Inspect the repo first. Look for `pyproject.toml`, `uv.lock`, `.python-version`, `.venv`.
+2. If the project is uv-managed, use `uv run`, `uv add`, `uv remove`, `uv sync`.
+3. If not uv-managed and the task is one-off, use `uv run --with` or `uvx`.
+4. Only consider `uv init` when the user explicitly asks, after confirming the directory is safe.

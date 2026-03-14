@@ -1,9 +1,0 @@
-{
-  "name": "force-uv",
-  "version": "0.1.0",
-  "description": "Enforce uv-first Python workflows and avoid unsafe python or pip habits in project repos.",
-  "contextFiles": [
-    "GEMINI.md",
-    "SKILL.md"
-  ]
-}
