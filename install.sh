@@ -151,10 +151,24 @@ PYEOF
   fi
 fi
 
-# --- Codex ---
+# --- configure Codex ---
 
-info "For Codex: copy AGENTS.md into your project root"
-info "  curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_uv/main/AGENTS.md -o AGENTS.md"
+CODEX_SKILLS="${CODEX_HOME:-$HOME/.codex}/skills"
+if [ -d "${CODEX_HOME:-$HOME/.codex}" ]; then
+  info "Detected Codex"
+  SKILL_DIR="$CODEX_SKILLS/force-uv"
+  if [ -d "$SKILL_DIR" ]; then
+    ok "Codex skill already installed at $SKILL_DIR"
+  else
+    mkdir -p "$CODEX_SKILLS"
+    mkdir -p "$SKILL_DIR"
+    cp "$TMPDIR/force_uv/SKILL.md" "$SKILL_DIR/SKILL.md"
+    ok "Codex skill installed to $SKILL_DIR"
+  fi
+else
+  info "For Codex: install as a global skill or copy AGENTS.md into your project"
+  info "  git clone https://github.com/maksymsherman/force_uv.git ~/.codex/skills/force-uv"
+fi
 
 # --- done ---
 

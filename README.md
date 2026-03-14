@@ -61,7 +61,13 @@ Same binary, different hook. Add to `~/.gemini/settings.json`:
 
 ### Codex
 
-Copy [`AGENTS.md`](./AGENTS.md) into your project root. Codex does not support pre-execution hooks.
+Install as a global skill (triggers automatically on Python/pip tasks):
+
+```sh
+git clone https://github.com/maksymsherman/force_uv.git ~/.codex/skills/force-uv
+```
+
+Or copy [`AGENTS.md`](./AGENTS.md) into a specific project root for per-project enforcement.
 
 ## Verify
 
