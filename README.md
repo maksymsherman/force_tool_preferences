@@ -7,16 +7,27 @@ A policy tool that redirects coding agents away from bare `python`/`pip` command
 - `python`, `python3`, `pip`, `pip3` (bare invocations)
 - `uv init` in existing projects (suggests safe alternatives)
 
-## Install
+## Quick install
 
-### Claude Code (hook)
+```sh
+curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_uv/main/install.sh | bash
+```
 
-Build the binary and add a `PreToolUse` hook:
+This builds the binary, installs it to `~/.local/bin/`, and auto-configures hooks for any detected agents (Claude Code, Gemini CLI). Requires Rust/Cargo.
+
+For Codex, copy the context file into your project:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_uv/main/AGENTS.md -o AGENTS.md
+```
+
+## Manual install
+
+### Claude Code
 
 ```sh
 git clone https://github.com/maksymsherman/force_uv.git
-cd force_uv
-cargo build --release
+cd force_uv && cargo build --release
 cp target/release/enforce-uv-command ~/.local/bin/
 ```
 
@@ -25,39 +36,38 @@ Add to `~/.claude/settings.json`:
 ```json
 {
   "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "enforce-uv-command --claude-hook-json"
-          }
-        ]
-      }
-    ]
+    "PreToolUse": [{
+      "matcher": "Bash",
+      "hooks": [{"type": "command", "command": "enforce-uv-command --claude-hook-json"}]
+    }]
   }
 }
 ```
 
-Restart Claude Code.
+### Gemini CLI
+
+Same binary, different hook. Add to `~/.gemini/settings.json`:
+
+```json
+{
+  "hooks": {
+    "BeforeTool": [{
+      "matcher": "run_shell_command",
+      "hooks": [{"type": "command", "command": "enforce-uv-command --gemini-hook-json"}]
+    }]
+  }
+}
+```
 
 ### Codex
 
-Copy [`AGENTS.md`](./AGENTS.md) into your project root.
-
-### Gemini CLI
-
-Copy [`GEMINI.md`](./GEMINI.md) into your project root.
+Copy [`AGENTS.md`](./AGENTS.md) into your project root. Codex does not support pre-execution hooks.
 
 ## Verify
 
 ```sh
-# should exit 0
-enforce-uv-command --command 'uv run pytest'
-
-# should exit 2 with a block message
-enforce-uv-command --command 'pip install requests'
+enforce-uv-command --command 'uv run pytest'    # exits 0
+enforce-uv-command --command 'pip install foo'   # exits 2, prints block message
 ```
 
 ## License

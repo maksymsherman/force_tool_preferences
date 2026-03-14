@@ -120,6 +120,9 @@ impl Config {
                     input = Some(InputMode::ClaudeHookJson);
                     claude_json = true;
                 }
+                "--gemini-hook-json" => {
+                    input = Some(InputMode::ClaudeHookJson);
+                }
                 "--claude-json" => {
                     claude_json = true;
                 }
@@ -173,7 +176,7 @@ impl Config {
 
 fn print_usage() {
     println!(
-        "Usage:\n  enforce-uv-command --command \"python -m pytest\" [--claude-json]\n  enforce-uv-command --stdin-command [--claude-json]\n  enforce-uv-command --claude-hook-json\n  enforce-uv-command --benchmark-command \"python -m pytest\" [--iterations 1000000]"
+        "Usage:\n  enforce-uv-command --command \"python -m pytest\" [--claude-json]\n  enforce-uv-command --stdin-command [--claude-json]\n  enforce-uv-command --claude-hook-json\n  enforce-uv-command --gemini-hook-json\n  enforce-uv-command --benchmark-command \"python -m pytest\" [--iterations 1000000]"
     );
 }
 
