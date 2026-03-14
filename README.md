@@ -13,9 +13,9 @@ A policy tool that redirects coding agents away from bare `python`/`pip` command
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_uv/main/install.sh | bash
 ```
 
-This builds the binary, installs it to `~/.local/bin/`, and auto-configures hooks for any detected agents (Claude Code, Gemini CLI). Requires Rust/Cargo.
+This builds the binary, installs it to `~/.local/bin/`, auto-configures hooks for any detected agents (Claude Code, Gemini CLI), and installs the Codex skill when Codex is detected. Requires Rust/Cargo.
 
-For Codex, copy the context file into your project:
+For Codex, prefer the reusable global skill. If you want project-local-only behavior instead, copy the context file into your project:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_uv/main/AGENTS.md -o AGENTS.md
@@ -61,13 +61,13 @@ Same binary, different hook. Add to `~/.gemini/settings.json`:
 
 ### Codex
 
-Install as a global skill (triggers automatically on Python/pip tasks):
+Install as a global skill (recommended; triggers automatically on Python/pip tasks):
 
 ```sh
 git clone https://github.com/maksymsherman/force_uv.git ~/.codex/skills/force-uv
 ```
 
-Or copy [`AGENTS.md`](./AGENTS.md) into a specific project root for per-project enforcement.
+Or copy [`AGENTS.md`](./AGENTS.md) into a specific project root as a project-local fallback.
 
 ## Verify
 
