@@ -4,11 +4,109 @@ set -euo pipefail
 REPO="https://github.com/maksymsherman/force_uv.git"
 INSTALL_DIR="${HOME}/.local/bin"
 BINARY_NAME="enforce-uv-command"
+CHECK_BINARY_HASH=0
+OVERWRITE_BINARY=0
+DRY_RUN=0
 
 info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 ok()    { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn()  { printf '\033[1;33m==>\033[0m %s\n' "$*"; }
 err()   { printf '\033[1;31m==>\033[0m %s\n' "$*" >&2; }
+
+usage() {
+  cat <<'EOF'
+Usage: install.sh [--check-binary-hash] [--overwrite-binary] [--dry-run] [--help]
+
+Options:
+  --check-binary-hash  Print the SHA-256 hashes for the built and installed binary.
+  --overwrite-binary   Force copying the built binary over the installed binary,
+                       even when the hashes already match.
+  --dry-run            Print the exact repo files, paths, and planned actions without
+                       cloning, building, or writing anything.
+  --help, -h           Show this help text.
+EOF
+}
+
+hash_file() {
+  local path="$1"
+
+  if command -v sha256sum &>/dev/null; then
+    sha256sum "$path" | awk '{print $1}'
+    return
+  fi
+
+  if command -v shasum &>/dev/null; then
+    shasum -a 256 "$path" | awk '{print $1}'
+    return
+  fi
+
+  if command -v openssl &>/dev/null; then
+    openssl dgst -sha256 "$path" | awk '{print $NF}'
+    return
+  fi
+
+  err "No SHA-256 tool found. Install one of: sha256sum, shasum, or openssl."
+  exit 1
+}
+
+print_dry_run_plan() {
+  local codex_home_dir="${CODEX_HOME:-$HOME/.codex}"
+
+  info "Dry run only. No files will be written and no code will be executed."
+  echo "Installer source:"
+  echo "  $REPO/raw/main/install.sh"
+  echo "Repo files this installer may execute after cloning:"
+  echo "  install.sh"
+  echo "  scripts/configure_claude_hook.py"
+  echo "  scripts/configure_gemini_hook.py"
+  echo "Planned actions:"
+  echo "  1. git clone --depth 1 $REPO <tmp>/force_uv"
+  echo "  2. (cd <tmp>/force_uv && cargo build --release --quiet)"
+  echo "  3. Compare <tmp>/force_uv/target/release/$BINARY_NAME against $INSTALL_DIR/$BINARY_NAME"
+  echo "  4. Install or update $INSTALL_DIR/$BINARY_NAME if needed"
+  echo "  5. If present, update $HOME/.claude/settings.json via scripts/configure_claude_hook.py"
+  echo "  6. If present, update $HOME/.gemini/settings.json via scripts/configure_gemini_hook.py"
+  echo "  7. Copy SKILL.md to $codex_home_dir/skills/force-uv/SKILL.md"
+  echo "Inspect locally before running:"
+  echo "  git clone $REPO"
+  echo "  cd force_uv"
+  echo "  sed -n '1,260p' install.sh"
+  echo "  sed -n '1,220p' scripts/configure_claude_hook.py"
+  echo "  sed -n '1,220p' scripts/configure_gemini_hook.py"
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --check-binary-hash)
+      CHECK_BINARY_HASH=1
+      ;;
+    --overwrite-binary)
+      OVERWRITE_BINARY=1
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      err "unknown argument: $1"
+      usage
+      exit 1
+      ;;
+  esac
+  shift
+done
+
+if [ "$DRY_RUN" -eq 1 ] && [ "$CHECK_BINARY_HASH" -eq 1 ]; then
+  warn "--check-binary-hash is ignored during --dry-run because the build step is skipped."
+fi
+
+if [ "$DRY_RUN" -eq 1 ]; then
+  print_dry_run_plan
+  exit 0
+fi
 
 # --- check prerequisites ---
 
@@ -36,9 +134,39 @@ info "Building..."
 # --- install binary ---
 
 mkdir -p "$INSTALL_DIR"
-cp "$TMPDIR/force_uv/target/release/$BINARY_NAME" "$INSTALL_DIR/$BINARY_NAME"
-chmod +x "$INSTALL_DIR/$BINARY_NAME"
-ok "Installed $INSTALL_DIR/$BINARY_NAME"
+SOURCE_BINARY="$TMPDIR/force_uv/target/release/$BINARY_NAME"
+TARGET_BINARY="$INSTALL_DIR/$BINARY_NAME"
+SOURCE_HASH="$(hash_file "$SOURCE_BINARY")"
+TARGET_HASH=""
+
+if [ -f "$TARGET_BINARY" ]; then
+  TARGET_HASH="$(hash_file "$TARGET_BINARY")"
+fi
+
+if [ "$CHECK_BINARY_HASH" -eq 1 ]; then
+  info "Built binary sha256:     $SOURCE_HASH"
+  if [ -n "$TARGET_HASH" ]; then
+    info "Installed binary sha256: $TARGET_HASH"
+  else
+    info "Installed binary sha256: <missing>"
+  fi
+fi
+
+if [ ! -f "$TARGET_BINARY" ]; then
+  cp "$SOURCE_BINARY" "$TARGET_BINARY"
+  chmod +x "$TARGET_BINARY"
+  ok "Installed $TARGET_BINARY"
+elif [ "$OVERWRITE_BINARY" -eq 1 ]; then
+  cp "$SOURCE_BINARY" "$TARGET_BINARY"
+  chmod +x "$TARGET_BINARY"
+  ok "Overwrote $TARGET_BINARY"
+elif [ "$SOURCE_HASH" != "$TARGET_HASH" ]; then
+  cp "$SOURCE_BINARY" "$TARGET_BINARY"
+  chmod +x "$TARGET_BINARY"
+  ok "Updated $TARGET_BINARY"
+else
+  ok "Binary already up to date at $TARGET_BINARY"
+fi
 
 # --- configure Claude Code ---
 
@@ -47,46 +175,10 @@ if [ -d "${HOME}/.claude" ]; then
   info "Detected Claude Code"
 
   if [ -f "$CLAUDE_SETTINGS" ]; then
-    uv --directory "$TMPDIR/force_uv" run --isolated python - "$CLAUDE_SETTINGS" "$BINARY_NAME" <<'PYEOF'
-import json, sys, os
-
-settings_path = sys.argv[1]
-binary = sys.argv[2]
-hook_command = f"{binary} --claude-hook-json"
-
-with open(settings_path) as f:
-    settings = json.load(f)
-
-hooks = settings.setdefault("hooks", {})
-pre = hooks.setdefault("PreToolUse", [])
-
-# find existing Bash matcher or create one
-bash_entry = None
-for entry in pre:
-    if entry.get("matcher") == "Bash":
-        bash_entry = entry
-        break
-
-if bash_entry is None:
-    bash_entry = {"matcher": "Bash", "hooks": []}
-    pre.append(bash_entry)
-
-hook_list = bash_entry.setdefault("hooks", [])
-
-# check if already installed
-for h in hook_list:
-    if hook_command in h.get("command", ""):
-        print(f"  Claude Code hook already configured", flush=True)
-        sys.exit(0)
-
-hook_list.append({"type": "command", "command": hook_command})
-
-with open(settings_path, "w") as f:
-    json.dump(settings, f, indent=2)
-    f.write("\n")
-
-print(f"  Added PreToolUse hook to {settings_path}", flush=True)
-PYEOF
+    uv --directory "$TMPDIR/force_uv" run --isolated python \
+      "$TMPDIR/force_uv/scripts/configure_claude_hook.py" \
+      "$CLAUDE_SETTINGS" \
+      "$BINARY_NAME"
     ok "Claude Code configured"
   else
     warn "Claude Code detected but could not configure hooks automatically"
@@ -110,45 +202,10 @@ if [ -d "${HOME}/.gemini" ]; then
 
   [ -f "$GEMINI_SETTINGS" ] || echo '{}' > "$GEMINI_SETTINGS"
 
-  uv --directory "$TMPDIR/force_uv" run --isolated python - "$GEMINI_SETTINGS" "$BINARY_NAME" <<'PYEOF'
-import json, sys
-
-settings_path = sys.argv[1]
-binary = sys.argv[2]
-hook_command = f"{binary} --gemini-hook-json"
-
-with open(settings_path) as f:
-    settings = json.load(f)
-
-hooks = settings.setdefault("hooks", {})
-before = hooks.setdefault("BeforeTool", [])
-
-# find existing run_shell_command matcher or create one
-shell_entry = None
-for entry in before:
-    if entry.get("matcher") == "run_shell_command":
-        shell_entry = entry
-        break
-
-if shell_entry is None:
-    shell_entry = {"matcher": "run_shell_command", "hooks": []}
-    before.append(shell_entry)
-
-hook_list = shell_entry.setdefault("hooks", [])
-
-for h in hook_list:
-    if hook_command in h.get("command", ""):
-        print(f"  Gemini CLI hook already configured", flush=True)
-        sys.exit(0)
-
-hook_list.append({"type": "command", "command": hook_command})
-
-with open(settings_path, "w") as f:
-    json.dump(settings, f, indent=2)
-    f.write("\n")
-
-print(f"  Added BeforeTool hook to {settings_path}", flush=True)
-PYEOF
+  uv --directory "$TMPDIR/force_uv" run --isolated python \
+    "$TMPDIR/force_uv/scripts/configure_gemini_hook.py" \
+    "$GEMINI_SETTINGS" \
+    "$BINARY_NAME"
   ok "Gemini CLI configured"
 fi
 

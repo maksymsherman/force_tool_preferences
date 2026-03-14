@@ -28,6 +28,40 @@ curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_uv/main/install
 
 This builds the binary, installs it to `~/.local/bin/`, auto-configures hooks for any detected agents (Claude Code, Gemini CLI), and installs the Codex skill at `~/.codex/skills/force-uv` even if Codex has not been launched yet. Requires Rust/Cargo and `uv`.
 
+The installer now compares the built binary against the installed one with SHA-256:
+
+- missing binary -> installs it
+- different hash -> updates it
+- same hash -> skips the copy unless you force an overwrite
+
+Useful variants:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_uv/main/install.sh | bash -s -- --check-binary-hash
+curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_uv/main/install.sh | bash -s -- --check-binary-hash --overwrite-binary
+curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_uv/main/install.sh | bash -s -- --dry-run
+```
+
+## Inspect before running
+
+If you want to see exactly what code and files are involved before installing, prefer downloading or cloning first instead of piping straight to `bash`.
+
+Review the installer plan without executing anything:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_uv/main/install.sh | bash -s -- --dry-run
+```
+
+Review the actual repo files locally:
+
+```sh
+git clone https://github.com/maksymsherman/force_uv.git
+cd force_uv
+sed -n '1,260p' install.sh
+sed -n '1,220p' scripts/configure_claude_hook.py
+sed -n '1,220p' scripts/configure_gemini_hook.py
+```
+
 ## Manual install
 
 ### Claude Code
