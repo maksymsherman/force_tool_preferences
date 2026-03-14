@@ -17,6 +17,11 @@ if ! command -v cargo &>/dev/null; then
   exit 1
 fi
 
+if ! command -v uv &>/dev/null; then
+  err "uv not found. Install uv first: https://docs.astral.sh/uv/"
+  exit 1
+fi
+
 # --- build ---
 
 TMPDIR="$(mktemp -d)"
@@ -41,8 +46,8 @@ CLAUDE_SETTINGS="${HOME}/.claude/settings.json"
 if [ -d "${HOME}/.claude" ]; then
   info "Detected Claude Code"
 
-  if [ -f "$CLAUDE_SETTINGS" ] && command -v python3 &>/dev/null; then
-    python3 - "$CLAUDE_SETTINGS" "$BINARY_NAME" <<'PYEOF'
+  if [ -f "$CLAUDE_SETTINGS" ]; then
+    uv --directory "$TMPDIR/force_uv" run --isolated python - "$CLAUDE_SETTINGS" "$BINARY_NAME" <<'PYEOF'
 import json, sys, os
 
 settings_path = sys.argv[1]
@@ -103,10 +108,9 @@ GEMINI_SETTINGS="${HOME}/.gemini/settings.json"
 if [ -d "${HOME}/.gemini" ]; then
   info "Detected Gemini CLI"
 
-  if command -v python3 &>/dev/null; then
-    [ -f "$GEMINI_SETTINGS" ] || echo '{}' > "$GEMINI_SETTINGS"
+  [ -f "$GEMINI_SETTINGS" ] || echo '{}' > "$GEMINI_SETTINGS"
 
-    python3 - "$GEMINI_SETTINGS" "$BINARY_NAME" <<'PYEOF'
+  uv --directory "$TMPDIR/force_uv" run --isolated python - "$GEMINI_SETTINGS" "$BINARY_NAME" <<'PYEOF'
 import json, sys
 
 settings_path = sys.argv[1]
@@ -145,30 +149,17 @@ with open(settings_path, "w") as f:
 
 print(f"  Added BeforeTool hook to {settings_path}", flush=True)
 PYEOF
-    ok "Gemini CLI configured"
-  else
-    warn "Gemini CLI detected but python3 not available for auto-config"
-  fi
+  ok "Gemini CLI configured"
 fi
 
-# --- configure Codex ---
+# --- install Codex skill ---
 
-CODEX_SKILLS="${CODEX_HOME:-$HOME/.codex}/skills"
-if [ -d "${CODEX_HOME:-$HOME/.codex}" ]; then
-  info "Detected Codex"
-  SKILL_DIR="$CODEX_SKILLS/force-uv"
-  if [ -d "$SKILL_DIR" ]; then
-    ok "Codex skill already installed at $SKILL_DIR"
-  else
-    mkdir -p "$CODEX_SKILLS"
-    mkdir -p "$SKILL_DIR"
-    cp "$TMPDIR/force_uv/SKILL.md" "$SKILL_DIR/SKILL.md"
-    ok "Codex skill installed to $SKILL_DIR"
-  fi
-else
-  info "For Codex: install as a global skill or copy AGENTS.md into your project"
-  info "  git clone https://github.com/maksymsherman/force_uv.git ~/.codex/skills/force-uv"
-fi
+CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
+CODEX_SKILLS="$CODEX_HOME_DIR/skills"
+SKILL_DIR="$CODEX_SKILLS/force-uv"
+mkdir -p "$SKILL_DIR"
+cp "$TMPDIR/force_uv/SKILL.md" "$SKILL_DIR/SKILL.md"
+ok "Codex skill installed to $SKILL_DIR"
 
 # --- done ---
 
