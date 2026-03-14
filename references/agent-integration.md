@@ -6,7 +6,7 @@ Use this file when installing the skill into a specific agent environment.
 
 - Keep `SKILL.md` as the canonical workflow.
 - Use agent-specific context files only to make the same policy discoverable in the format that agent expects.
-- Use `scripts/enforce-uv-command.sh` when the agent supports shell-command interception.
+- Build `target/release/enforce-uv-command` with `cargo build --release`, then use that binary when the agent supports shell-command interception.
 
 ## Codex / OpenAI
 
@@ -29,7 +29,7 @@ Use this file when installing the skill into a specific agent environment.
         "hooks": [
           {
             "type": "command",
-            "command": "jq -r '.tool_input.command' | \"$CLAUDE_PROJECT_DIR/scripts/enforce-uv-command.sh\" --stdin-command --claude-json"
+            "command": "\"$CLAUDE_PROJECT_DIR/target/release/enforce-uv-command\" --claude-hook-json"
           }
         ]
       }
@@ -38,13 +38,13 @@ Use this file when installing the skill into a specific agent environment.
 }
 ```
 
-- The policy script blocks bare `python`, `python3`, `pip`, `pip3`, and `uv init`, then returns a machine-readable reason that tells Claude what to do instead.
+- The compiled policy binary blocks bare `python`, `python3`, `pip`, `pip3`, and `uv init`, then returns a machine-readable reason that tells Claude what to do instead.
 
 ## Gemini
 
 - `GEMINI.md` provides repo-local instructions for Gemini CLI.
 - `gemini-extension.json` packages the context files in a format that matches Gemini CLI extensions built around `GEMINI.md`.
-- This repo does not ship a Gemini hook config because Gemini's hook surface is less stable across releases than Claude's documented `PreToolUse` hooks. The same policy script is still reusable if you standardize on a Gemini hook contract later.
+- This repo does not ship a Gemini hook config because Gemini's hook surface is less stable across releases than Claude's documented `PreToolUse` hooks. The same policy binary is still reusable if you standardize on a Gemini hook contract later.
 
 ## Source material
 

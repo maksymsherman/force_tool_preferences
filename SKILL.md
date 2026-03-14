@@ -56,4 +56,4 @@ If the user explicitly wants pip-compatible behavior, use `uv pip ...`, but pref
 - Use Astral's live documentation as the source of truth when command syntax, defaults, or guidance may have changed. Start with the agent-friendly index at <https://docs.astral.sh/uv/llms.txt>, then use the main docs at <https://docs.astral.sh/uv/> as needed.
 - Read `references/uv-quick-reference.md` for concise `uv` guidance and safe command selection.
 - Read `references/agent-integration.md` when wiring this policy into Codex, Claude Code, or Gemini.
-- Use `scripts/enforce-uv-command.sh` when an agent supports shell hooks or command interception.
+- Build the Rust binary with `cargo build --release`, then use `target/release/enforce-uv-command` when an agent supports shell hooks or command interception.

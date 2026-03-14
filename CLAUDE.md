@@ -5,4 +5,4 @@
 
 ## Claude-specific note
 
-- If shell hooks are enabled, wire `scripts/enforce-uv-command.sh` into a `PreToolUse` hook for the Bash tool so bare `python`, `python3`, `pip`, and `pip3` commands are blocked before execution.
+- If shell hooks are enabled, wire `target/release/enforce-uv-command --claude-hook-json` into a `PreToolUse` hook for the Bash tool so bare `python`, `python3`, `pip`, and `pip3` commands are blocked before execution.
