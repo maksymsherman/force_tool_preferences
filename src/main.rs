@@ -426,7 +426,9 @@ fn update_segment_tracker(value: &[u8], tracker: &mut ParsedSegmentTracker) {
                     tracker.state = ParsedSegmentState::SeekUvDecision;
                     tracker.wrapper = None;
                 }
-                TokenKind::Uvx | TokenKind::Other => tracker.state = ParsedSegmentState::SkipSegment,
+                TokenKind::Uvx | TokenKind::Other => {
+                    tracker.state = ParsedSegmentState::SkipSegment
+                }
                 TokenKind::PythonLike | TokenKind::PipLike => {
                     tracker.state = ParsedSegmentState::PreserveSegment;
                 }
@@ -745,19 +747,7 @@ fn insert_before_command(
     command_index: usize,
     inserted: &[&str],
 ) -> String {
-    let mut parts = Vec::with_capacity(tokens.len() + inserted.len());
-    parts.extend(
-        tokens[..command_index]
-            .iter()
-            .map(|token| token.raw.clone()),
-    );
-    parts.extend(inserted.iter().map(|item| (*item).to_string()));
-    parts.extend(
-        tokens[command_index..]
-            .iter()
-            .map(|token| token.raw.clone()),
-    );
-    parts.join(" ")
+    rewrite_command(tokens, command_index, 0, inserted)
 }
 
 fn replace_command(
@@ -766,19 +756,49 @@ fn replace_command(
     consumed: usize,
     replacement: &[&str],
 ) -> String {
-    let mut parts = Vec::with_capacity(tokens.len() + replacement.len());
-    parts.extend(
-        tokens[..command_index]
+    rewrite_command(tokens, command_index, consumed, replacement)
+}
+
+fn rewrite_command(
+    tokens: &[ParsedToken],
+    command_index: usize,
+    consumed: usize,
+    replacement: &[&str],
+) -> String {
+    let suffix_start = command_index + consumed;
+    let part_count = command_index + replacement.len() + tokens.len().saturating_sub(suffix_start);
+    let total_len = tokens[..command_index]
+        .iter()
+        .map(|token| token.raw.len())
+        .sum::<usize>()
+        + replacement.iter().map(|item| item.len()).sum::<usize>()
+        + tokens[suffix_start..]
             .iter()
-            .map(|token| token.raw.clone()),
-    );
-    parts.extend(replacement.iter().map(|item| (*item).to_string()));
-    parts.extend(
-        tokens[command_index + consumed..]
-            .iter()
-            .map(|token| token.raw.clone()),
-    );
-    parts.join(" ")
+            .map(|token| token.raw.len())
+            .sum::<usize>()
+        + part_count.saturating_sub(1);
+    let mut output = String::with_capacity(total_len);
+    let mut needs_space = false;
+
+    for token in &tokens[..command_index] {
+        push_command_part(&mut output, &token.raw, &mut needs_space);
+    }
+    for item in replacement {
+        push_command_part(&mut output, item, &mut needs_space);
+    }
+    for token in &tokens[suffix_start..] {
+        push_command_part(&mut output, &token.raw, &mut needs_space);
+    }
+
+    output
+}
+
+fn push_command_part(output: &mut String, part: &str, needs_space: &mut bool) {
+    if *needs_space {
+        output.push(' ');
+    }
+    output.push_str(part);
+    *needs_space = true;
 }
 
 fn format_exact_suggestion(base: &str, suggestion: &str) -> String {
