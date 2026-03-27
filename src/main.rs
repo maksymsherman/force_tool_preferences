@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::env;
 use std::fs;
 use std::io::{self, Read};
@@ -295,22 +296,22 @@ fn evaluate_command(command: &str) -> Option<BlockDecision> {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ParsedToken {
-    raw: String,
-    value: String,
+struct ParsedToken<'a> {
+    raw: &'a str,
+    value: Cow<'a, str>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct ParsedSegment {
-    tokens: Vec<ParsedToken>,
+struct ParsedSegment<'a> {
+    tokens: Vec<ParsedToken<'a>>,
 }
 
-fn parse_segments(command: &str) -> Vec<ParsedSegment> {
+fn parse_segments(command: &str) -> Vec<ParsedSegment<'_>> {
     let bytes = command.as_bytes();
     let mut segments = Vec::new();
     let mut tokens = Vec::new();
-    let mut raw = Vec::with_capacity(32);
-    let mut value = Vec::with_capacity(32);
+    let mut token_start = None;
+    let mut value: Option<Vec<u8>> = None;
     let mut in_single_quote = false;
     let mut in_double_quote = false;
     let mut index = 0usize;
@@ -319,11 +320,13 @@ fn parse_segments(command: &str) -> Vec<ParsedSegment> {
         let byte = bytes[index];
 
         if in_single_quote {
-            raw.push(byte);
             if byte == b'\'' {
                 in_single_quote = false;
             } else {
-                value.push(byte);
+                value
+                    .as_mut()
+                    .expect("quoted tokens must use an owned value buffer")
+                    .push(byte);
             }
             index += 1;
             continue;
@@ -331,88 +334,119 @@ fn parse_segments(command: &str) -> Vec<ParsedSegment> {
 
         if in_double_quote {
             match byte {
-                b'"' => {
-                    raw.push(byte);
-                    in_double_quote = false;
-                }
+                b'"' => in_double_quote = false,
                 b'\\' => {
-                    raw.push(byte);
                     if index + 1 < bytes.len() {
                         index += 1;
-                        raw.push(bytes[index]);
-                        value.push(bytes[index]);
+                        value
+                            .as_mut()
+                            .expect("quoted tokens must use an owned value buffer")
+                            .push(bytes[index]);
                     } else {
-                        value.push(b'\\');
+                        value
+                            .as_mut()
+                            .expect("quoted tokens must use an owned value buffer")
+                            .push(b'\\');
                     }
                 }
-                _ => {
-                    raw.push(byte);
-                    value.push(byte);
-                }
+                _ => value
+                    .as_mut()
+                    .expect("quoted tokens must use an owned value buffer")
+                    .push(byte),
             }
             index += 1;
             continue;
         }
 
         match byte {
-            b' ' | b'\n' | b'\r' | b'\t' => flush_parsed_token(&mut raw, &mut value, &mut tokens),
+            b' ' | b'\n' | b'\r' | b'\t' => {
+                flush_parsed_token(command, index, &mut token_start, &mut value, &mut tokens)
+            }
             b'\'' => {
-                raw.push(byte);
+                let start = token_start.get_or_insert(index);
+                ensure_owned_value(command, *start, index, &mut value);
                 in_single_quote = true;
             }
             b'"' => {
-                raw.push(byte);
+                let start = token_start.get_or_insert(index);
+                ensure_owned_value(command, *start, index, &mut value);
                 in_double_quote = true;
             }
             b';' => {
-                flush_parsed_token(&mut raw, &mut value, &mut tokens);
+                flush_parsed_token(command, index, &mut token_start, &mut value, &mut tokens);
                 flush_segment(&mut tokens, &mut segments);
             }
             b'|' | b'&' => {
-                flush_parsed_token(&mut raw, &mut value, &mut tokens);
+                flush_parsed_token(command, index, &mut token_start, &mut value, &mut tokens);
                 flush_segment(&mut tokens, &mut segments);
                 if index + 1 < bytes.len() && bytes[index + 1] == byte {
                     index += 1;
                 }
             }
             b'\\' => {
-                raw.push(byte);
+                let start = token_start.get_or_insert(index);
+                let value = ensure_owned_value(command, *start, index, &mut value);
                 if index + 1 < bytes.len() {
                     index += 1;
-                    raw.push(bytes[index]);
                     value.push(bytes[index]);
                 } else {
                     value.push(b'\\');
                 }
             }
             _ => {
-                raw.push(byte);
-                value.push(byte);
+                token_start.get_or_insert(index);
+                if let Some(value) = value.as_mut() {
+                    value.push(byte);
+                }
             }
         }
 
         index += 1;
     }
 
-    flush_parsed_token(&mut raw, &mut value, &mut tokens);
+    flush_parsed_token(
+        command,
+        bytes.len(),
+        &mut token_start,
+        &mut value,
+        &mut tokens,
+    );
     flush_segment(&mut tokens, &mut segments);
     segments
 }
 
-fn flush_parsed_token(raw: &mut Vec<u8>, value: &mut Vec<u8>, tokens: &mut Vec<ParsedToken>) {
-    if raw.is_empty() {
-        return;
-    }
-
-    tokens.push(ParsedToken {
-        raw: String::from_utf8_lossy(raw).into_owned(),
-        value: String::from_utf8_lossy(value).into_owned(),
-    });
-    raw.clear();
-    value.clear();
+fn ensure_owned_value<'a, 'b>(
+    command: &'a str,
+    token_start: usize,
+    prefix_end: usize,
+    value: &'b mut Option<Vec<u8>>,
+) -> &'b mut Vec<u8> {
+    value.get_or_insert_with(|| command[token_start..prefix_end].as_bytes().to_vec())
 }
 
-fn flush_segment(tokens: &mut Vec<ParsedToken>, segments: &mut Vec<ParsedSegment>) {
+fn flush_parsed_token<'a>(
+    command: &'a str,
+    token_end: usize,
+    token_start: &mut Option<usize>,
+    value: &mut Option<Vec<u8>>,
+    tokens: &mut Vec<ParsedToken<'a>>,
+) {
+    let Some(start) = token_start.take() else {
+        return;
+    };
+
+    let raw = &command[start..token_end];
+    let value = match value.take() {
+        Some(value) => {
+            Cow::Owned(String::from_utf8(value).expect("parser only collects valid UTF-8 bytes"))
+        }
+        None => Cow::Borrowed(raw),
+    };
+
+    tokens.push(ParsedToken { raw, value });
+}
+
+fn flush_segment<'a>(tokens: &mut Vec<ParsedToken<'a>>, segments: &mut Vec<ParsedSegment<'a>>) {
     if tokens.is_empty() {
         return;
     }
@@ -427,7 +461,7 @@ enum SegmentState {
     SeekCommand,
 }
 
-fn evaluate_segment(tokens: &[ParsedToken]) -> Option<BlockDecision> {
+fn evaluate_segment(tokens: &[ParsedToken<'_>]) -> Option<BlockDecision> {
     let state = SegmentState::SeekCommand;
     let mut wrapper = None;
     let mut skip_next_value = false;
@@ -468,7 +502,7 @@ fn evaluate_segment(tokens: &[ParsedToken]) -> Option<BlockDecision> {
     None
 }
 
-fn build_grep_decision(tokens: &[ParsedToken], command_index: usize) -> BlockDecision {
+fn build_grep_decision(tokens: &[ParsedToken<'_>], command_index: usize) -> BlockDecision {
     match rewrite_grep_to_rg(tokens, command_index) {
         GrepRewrite::Exact(suggestion) => {
             BlockDecision::new(format_exact_suggestion(GREP_MESSAGE, &suggestion))
@@ -487,7 +521,7 @@ enum GrepRewrite {
 /// Rewrite a grep/egrep/fgrep command to the equivalent rg command when the
 /// mapping is high confidence. Otherwise return the flags that need manual
 /// translation before switching to rg.
-fn rewrite_grep_to_rg(tokens: &[ParsedToken], command_index: usize) -> GrepRewrite {
+fn rewrite_grep_to_rg(tokens: &[ParsedToken<'_>], command_index: usize) -> GrepRewrite {
     let cmd_name = normalized_program_name(tokens[command_index].value.as_bytes());
     let is_fgrep = cmd_name == b"fgrep";
     let estimated_len = tokens
@@ -516,7 +550,7 @@ fn rewrite_grep_to_rg(tokens: &[ParsedToken], command_index: usize) -> GrepRewri
     let rest = &tokens[command_index + 1..];
 
     for token in rest {
-        let val = token.value.as_str();
+        let val = token.value.as_ref();
 
         if end_of_options || !val.starts_with('-') || val == "-" {
             push_suggestion_part(&mut suggestion, &token.raw, &mut has_parts);
@@ -541,7 +575,7 @@ fn rewrite_grep_to_rg(tokens: &[ParsedToken], command_index: usize) -> GrepRewri
                     continue;
                 }
                 LongFlagResult::Uncertain => {
-                    uncertain_flags.push(token.raw.clone());
+                    uncertain_flags.push(token.raw.to_string());
                     continue;
                 }
             }
@@ -561,7 +595,7 @@ fn rewrite_grep_to_rg(tokens: &[ParsedToken], command_index: usize) -> GrepRewri
                 continue;
             }
             ShortFlagResult::Uncertain => {
-                uncertain_flags.push(token.raw.clone());
+                uncertain_flags.push(token.raw.to_string());
                 continue;
             }
         }
@@ -1457,6 +1491,15 @@ mod tests {
     fn handles_shell_assignments() {
         let message = decision_message("FOO=bar grep pattern file.txt");
         assert!(message.contains("FOO=bar rg pattern file.txt"));
+    }
+
+    #[test]
+    fn preserves_quoted_and_escaped_tokens() {
+        let message = decision_message("grep \"two words\" 'file name.txt'");
+        assert!(message.contains("rg \"two words\" 'file name.txt'"));
+
+        let message = decision_message("grep foo\\ bar file.txt");
+        assert!(message.contains("rg foo\\ bar file.txt"));
     }
 
     #[test]
