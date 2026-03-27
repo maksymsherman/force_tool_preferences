@@ -237,6 +237,31 @@ struct ParsedSegment {
     tokens: Vec<ParsedToken>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ParsedSegmentState {
+    SeekCommand,
+    SeekUvDecision,
+    PreserveSegment,
+    SkipSegment,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ParsedSegmentTracker {
+    state: ParsedSegmentState,
+    wrapper: Option<WrapperKind>,
+    skip_next_value: bool,
+}
+
+impl Default for ParsedSegmentTracker {
+    fn default() -> Self {
+        Self {
+            state: ParsedSegmentState::SeekCommand,
+            wrapper: None,
+            skip_next_value: false,
+        }
+    }
+}
+
 fn parse_segments(command: &str) -> Vec<ParsedSegment> {
     let bytes = command.as_bytes();
     let mut segments = Vec::new();
@@ -245,6 +270,7 @@ fn parse_segments(command: &str) -> Vec<ParsedSegment> {
     let mut value = Vec::with_capacity(32);
     let mut in_single_quote = false;
     let mut in_double_quote = false;
+    let mut tracker = ParsedSegmentTracker::default();
     let mut index = 0usize;
 
     while index < bytes.len() {
@@ -287,7 +313,20 @@ fn parse_segments(command: &str) -> Vec<ParsedSegment> {
         }
 
         match byte {
-            b' ' | b'\n' | b'\r' | b'\t' => flush_parsed_token(&mut raw, &mut value, &mut tokens),
+            b' ' | b'\n' | b'\r' | b'\t' => {
+                finish_parsed_token(&mut raw, &mut value, &mut tokens, &mut tracker);
+                if tracker.state == ParsedSegmentState::SkipSegment {
+                    flush_segment(&mut tokens, &mut segments);
+                    tracker = ParsedSegmentTracker::default();
+                    index = skip_segment_tail(
+                        bytes,
+                        index + 1,
+                        &mut in_single_quote,
+                        &mut in_double_quote,
+                    );
+                    continue;
+                }
+            }
             b'\'' => {
                 raw.push(byte);
                 in_single_quote = true;
@@ -297,12 +336,14 @@ fn parse_segments(command: &str) -> Vec<ParsedSegment> {
                 in_double_quote = true;
             }
             b';' => {
-                flush_parsed_token(&mut raw, &mut value, &mut tokens);
+                finish_parsed_token(&mut raw, &mut value, &mut tokens, &mut tracker);
                 flush_segment(&mut tokens, &mut segments);
+                tracker = ParsedSegmentTracker::default();
             }
             b'|' | b'&' => {
-                flush_parsed_token(&mut raw, &mut value, &mut tokens);
+                finish_parsed_token(&mut raw, &mut value, &mut tokens, &mut tracker);
                 flush_segment(&mut tokens, &mut segments);
+                tracker = ParsedSegmentTracker::default();
                 if index + 1 < bytes.len() && bytes[index + 1] == byte {
                     index += 1;
                 }
@@ -326,22 +367,157 @@ fn parse_segments(command: &str) -> Vec<ParsedSegment> {
         index += 1;
     }
 
-    flush_parsed_token(&mut raw, &mut value, &mut tokens);
+    finish_parsed_token(&mut raw, &mut value, &mut tokens, &mut tracker);
     flush_segment(&mut tokens, &mut segments);
     segments
 }
 
-fn flush_parsed_token(raw: &mut Vec<u8>, value: &mut Vec<u8>, tokens: &mut Vec<ParsedToken>) {
+fn finish_parsed_token(
+    raw: &mut Vec<u8>,
+    value: &mut Vec<u8>,
+    tokens: &mut Vec<ParsedToken>,
+    tracker: &mut ParsedSegmentTracker,
+) {
     if raw.is_empty() {
         return;
     }
 
+    update_segment_tracker(value, tracker);
     tokens.push(ParsedToken {
         raw: String::from_utf8_lossy(raw).into_owned(),
         value: String::from_utf8_lossy(value).into_owned(),
     });
     raw.clear();
     value.clear();
+}
+
+fn update_segment_tracker(value: &[u8], tracker: &mut ParsedSegmentTracker) {
+    match tracker.state {
+        ParsedSegmentState::PreserveSegment | ParsedSegmentState::SkipSegment => return,
+        ParsedSegmentState::SeekCommand if tracker.skip_next_value => {
+            tracker.skip_next_value = false;
+            return;
+        }
+        ParsedSegmentState::SeekUvDecision if tracker.skip_next_value => {
+            tracker.skip_next_value = false;
+            return;
+        }
+        _ => {}
+    }
+
+    match tracker.state {
+        ParsedSegmentState::SeekCommand => {
+            if value.starts_with(b"-") {
+                if let Some(wrapper_kind) = tracker.wrapper {
+                    tracker.skip_next_value = wrapper_option_takes_value(wrapper_kind, value);
+                }
+                return;
+            }
+
+            if is_shell_assignment(value) {
+                return;
+            }
+
+            match classify_token(value) {
+                TokenKind::Wrapper => {
+                    tracker.wrapper = wrapper_kind(value);
+                }
+                TokenKind::Uv => {
+                    tracker.state = ParsedSegmentState::SeekUvDecision;
+                    tracker.wrapper = None;
+                }
+                TokenKind::Uvx | TokenKind::Other => tracker.state = ParsedSegmentState::SkipSegment,
+                TokenKind::PythonLike | TokenKind::PipLike => {
+                    tracker.state = ParsedSegmentState::PreserveSegment;
+                }
+            }
+        }
+        ParsedSegmentState::SeekUvDecision => {
+            if value.starts_with(b"-") {
+                tracker.skip_next_value = uv_option_takes_value(value);
+                return;
+            }
+
+            if is_shell_assignment(value) {
+                return;
+            }
+
+            let name = normalized_program_name(value);
+            if name == b"init" {
+                tracker.state = ParsedSegmentState::PreserveSegment;
+            } else {
+                tracker.state = ParsedSegmentState::SkipSegment;
+            }
+        }
+        ParsedSegmentState::PreserveSegment | ParsedSegmentState::SkipSegment => {}
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn skip_segment_tail(
+    bytes: &[u8],
+    mut index: usize,
+    in_single_quote: &mut bool,
+    in_double_quote: &mut bool,
+) -> usize {
+    let mut escape_next = false;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+
+        if escape_next {
+            escape_next = false;
+            index += 1;
+            continue;
+        }
+
+        if *in_single_quote {
+            if byte == b'\'' {
+                *in_single_quote = false;
+            }
+            index += 1;
+            continue;
+        }
+
+        if *in_double_quote {
+            match byte {
+                b'"' => *in_double_quote = false,
+                b'\\' => escape_next = true,
+                _ => {}
+            }
+            index += 1;
+            continue;
+        }
+
+        match byte {
+            b'\'' => {
+                *in_single_quote = true;
+                index += 1;
+            }
+            b'"' => {
+                *in_double_quote = true;
+                index += 1;
+            }
+            b'\\' => {
+                escape_next = true;
+                index += 1;
+            }
+            b';' => {
+                return index + 1;
+            }
+            b'|' | b'&' => {
+                return if index + 1 < bytes.len() && bytes[index + 1] == byte {
+                    index + 2
+                } else {
+                    index + 1
+                };
+            }
+            _ => index += 1,
+        }
+    }
+
+    index
 }
 
 fn flush_segment(tokens: &mut Vec<ParsedToken>, segments: &mut Vec<ParsedSegment>) {
@@ -1173,6 +1349,22 @@ mod tests {
         assert_eq!(evaluate_command("echo python"), None);
         assert_eq!(evaluate_command("printf '%s' python"), None);
         assert_eq!(evaluate_command("uv run echo init"), None);
+    }
+
+    #[test]
+    fn resumes_parsing_after_safe_segment_separator() {
+        let and_then = decision_message("uv run pytest && python -m pytest");
+        assert!(and_then.contains("uv run python -m pytest"));
+
+        let sequence = decision_message("uv run pytest; python -m pytest");
+        assert!(sequence.contains("uv run python -m pytest"));
+    }
+
+    #[test]
+    fn ignores_quoted_separators_inside_safe_segment_arguments() {
+        let message = decision_message("uv run \"foo && bar\" && python -m pytest");
+        assert!(message.contains("uv run python -m pytest"));
+        assert_eq!(evaluate_command("uv run \"foo && bar\""), None);
     }
 
     #[test]
