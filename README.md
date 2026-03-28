@@ -108,8 +108,8 @@ Using the built-in benchmark mode on a release build of `enforce-uv-command`:
 
 | Case | Example input | Average per evaluation |
 |---|---|---:|
-| Allowed command | `uv run pytest` | `0.3379 us` (`0.0000003379 s`) |
-| Blocked command | `python -m pytest` | `0.6780 us` (`0.0000006780 s`) |
+| Allowed command | `uv run pytest` | `0.3161 us` (`0.0000003161 s`) |
+| Blocked command | `python -m pytest` | `0.3622 us` (`0.0000003622 s`) |
 
 These numbers measure the command evaluator inside the binary. End-to-end hook wall time will be higher because shell startup, process startup, and agent hook plumbing sit outside this benchmark.
 
