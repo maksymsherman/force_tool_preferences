@@ -104,12 +104,12 @@ The implementation is a single Rust binary with no runtime service. It is design
 
 `force_uv` is meant to stay enabled in the hook path, so evaluator overhead matters.
 
-On a release build of `enforce-uv-command` running on a Linux KVM VM with 12 vCPUs (`AMD EPYC Processor (with IBPB)`), the built-in benchmark mode measured:
+Using the built-in benchmark mode on a release build of `enforce-uv-command`:
 
-| Case | Example input | Total time | Average per evaluation |
-|---|---|---:|---:|
-| Allowed command | `uv run pytest` | `1.6896 s` | `0.3379 us` |
-| Blocked command | `python -m pytest` | `3.3901 s` | `0.6780 us` |
+| Case | Example input | Average per evaluation |
+|---|---|---:|
+| Allowed command | `uv run pytest` | `0.3379 us` (`0.0000003379 s`) |
+| Blocked command | `python -m pytest` | `0.6780 us` (`0.0000006780 s`) |
 
 These numbers measure the command evaluator inside the binary. End-to-end hook wall time will be higher because shell startup, process startup, and agent hook plumbing sit outside this benchmark.
 
