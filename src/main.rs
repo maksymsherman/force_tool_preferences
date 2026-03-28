@@ -7,14 +7,69 @@ const PYTHON_MESSAGE: &str = "Use uv instead of bare Python or pip commands in t
 const UV_INIT_MESSAGE: &str = "Do not run 'uv init' in an existing project unless the user explicitly asks for project creation or conversion. Inspect the repo first and prefer 'uv run', 'uv add', 'uv sync', or 'uv run --with'. If project initialization is truly needed, use 'uv init --no-readme --no-workspace' to avoid overwriting existing files and git history.";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+enum SuggestionSet {
+    Exact(String),
+    Alternatives(Vec<String>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct BlockDecision {
-    message: String,
+    base: &'static str,
+    suggestions: Option<SuggestionSet>,
+    note: Option<&'static str>,
 }
 
 impl BlockDecision {
-    fn new(message: impl Into<String>) -> Self {
+    fn plain(message: &'static str) -> Self {
         Self {
-            message: message.into(),
+            base: message,
+            suggestions: None,
+            note: None,
+        }
+    }
+
+    fn exact(base: &'static str, suggestion: String) -> Self {
+        Self {
+            base,
+            suggestions: Some(SuggestionSet::Exact(suggestion)),
+            note: None,
+        }
+    }
+
+    fn exact_with_note(base: &'static str, suggestion: String, note: &'static str) -> Self {
+        Self {
+            base,
+            suggestions: Some(SuggestionSet::Exact(suggestion)),
+            note: Some(note),
+        }
+    }
+
+    fn alternatives(
+        base: &'static str,
+        suggestions: Vec<String>,
+        note: Option<&'static str>,
+    ) -> Self {
+        Self {
+            base,
+            suggestions: Some(SuggestionSet::Alternatives(suggestions)),
+            note,
+        }
+    }
+
+    fn render_message(&self) -> String {
+        match &self.suggestions {
+            Some(SuggestionSet::Exact(suggestion)) => {
+                let mut message = format_exact_suggestion(self.base, suggestion);
+                if let Some(note) = self.note {
+                    message.push('\n');
+                    message.push_str(note);
+                }
+                message
+            }
+            Some(SuggestionSet::Alternatives(suggestions)) => {
+                format_alternative_suggestions(self.base, suggestions, self.note)
+            }
+            None => self.base.to_string(),
         }
     }
 }
@@ -44,14 +99,15 @@ fn run() -> Result<i32, String> {
 
             match evaluate_command(raw.trim()) {
                 Some(decision) if claude_json => {
+                    let message = decision.render_message();
                     println!(
                         "{{\"decision\":\"block\",\"reason\":\"{}\"}}",
-                        escape_json(&decision.message)
+                        escape_json(&message)
                     );
                     Ok(0)
                 }
                 Some(decision) => {
-                    eprintln!("{}", decision.message);
+                    eprintln!("{}", decision.render_message());
                     Ok(2)
                 }
                 None => Ok(0),
@@ -478,7 +534,7 @@ fn update_evaluation_tracker(
 
             let name = normalized_program_name(value);
             if name == b"init" {
-                return Some(BlockDecision::new(UV_INIT_MESSAGE));
+                return Some(BlockDecision::plain(UV_INIT_MESSAGE));
             }
 
             tracker.state = EvaluationState::SkipSegment;
@@ -581,7 +637,7 @@ fn reset_evaluation_segment(tokens: &mut Vec<ParsedToken>, tracker: &mut Evaluat
 
 fn build_python_decision(tokens: &[ParsedToken], command_index: usize) -> BlockDecision {
     let suggestion = insert_before_command(tokens, command_index, &["uv", "run"]);
-    BlockDecision::new(format_exact_suggestion(PYTHON_MESSAGE, &suggestion))
+    BlockDecision::exact(PYTHON_MESSAGE, suggestion)
 }
 
 fn build_pip_decision(tokens: &[ParsedToken], command_index: usize) -> BlockDecision {
@@ -590,7 +646,7 @@ fn build_pip_decision(tokens: &[ParsedToken], command_index: usize) -> BlockDeci
         .get(command_index + 1)
         .map(|token| token.value.as_str())
     else {
-        return BlockDecision::new(format_exact_suggestion(PYTHON_MESSAGE, &pip_rewrite));
+        return BlockDecision::exact(PYTHON_MESSAGE, pip_rewrite);
     };
 
     if subcommand.eq_ignore_ascii_case("install") {
@@ -601,7 +657,7 @@ fn build_pip_decision(tokens: &[ParsedToken], command_index: usize) -> BlockDeci
         return build_pip_uninstall_decision(tokens, command_index, pip_rewrite);
     }
 
-    BlockDecision::new(format_exact_suggestion(PYTHON_MESSAGE, &pip_rewrite))
+    BlockDecision::exact(PYTHON_MESSAGE, pip_rewrite)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -681,18 +737,18 @@ fn build_pip_install_decision(
     let dependency_args = &tokens[command_index + 2..];
     if is_high_confidence_dependency_list(dependency_args) {
         let project_rewrite = replace_command(tokens, command_index, 2, &["uv", "add"]);
-        return BlockDecision::new(format_alternative_suggestions(
+        return BlockDecision::alternatives(
             PYTHON_MESSAGE,
-            &[project_rewrite, pip_rewrite],
+            vec![project_rewrite, pip_rewrite],
             Some("Choose `uv add` for project dependencies; choose `uv pip` to keep pip-style behavior."),
-        ));
+        );
     }
 
-    BlockDecision::new(format_exact_suggestion_with_note(
+    BlockDecision::exact_with_note(
         PYTHON_MESSAGE,
-        &pip_rewrite,
+        pip_rewrite,
         "Use `uv add ...` only when you intentionally want to modify project dependencies.",
-    ))
+    )
 }
 
 fn build_pip_uninstall_decision(
@@ -703,18 +759,18 @@ fn build_pip_uninstall_decision(
     let dependency_args = &tokens[command_index + 2..];
     if is_high_confidence_dependency_list(dependency_args) {
         let project_rewrite = replace_command(tokens, command_index, 2, &["uv", "remove"]);
-        return BlockDecision::new(format_alternative_suggestions(
+        return BlockDecision::alternatives(
             PYTHON_MESSAGE,
-            &[project_rewrite, pip_rewrite],
+            vec![project_rewrite, pip_rewrite],
             Some("Choose `uv remove` when the package belongs in project metadata; choose `uv pip` for pip-style environment changes."),
-        ));
+        );
     }
 
-    BlockDecision::new(format_exact_suggestion_with_note(
+    BlockDecision::exact_with_note(
         PYTHON_MESSAGE,
-        &pip_rewrite,
+        pip_rewrite,
         "Use `uv remove ...` only when you intentionally want to update project dependencies.",
-    ))
+    )
 }
 
 fn insert_before_command(
@@ -778,13 +834,6 @@ fn push_command_part(output: &mut String, part: &str, needs_space: &mut bool) {
 
 fn format_exact_suggestion(base: &str, suggestion: &str) -> String {
     format!("{base}\nSuggested replacement:\n  {suggestion}")
-}
-
-fn format_exact_suggestion_with_note(base: &str, suggestion: &str, note: &str) -> String {
-    let mut message = format_exact_suggestion(base, suggestion);
-    message.push('\n');
-    message.push_str(note);
-    message
 }
 
 fn format_alternative_suggestions(
@@ -1261,7 +1310,7 @@ mod tests {
     use super::*;
 
     fn decision_message(command: &str) -> String {
-        evaluate_command(command).unwrap().message
+        evaluate_command(command).unwrap().render_message()
     }
 
     #[test]
