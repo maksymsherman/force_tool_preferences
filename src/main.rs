@@ -6,6 +6,7 @@ use std::process;
 use std::time::Instant;
 
 use serde_json::{json, Map, Value};
+use smallvec::SmallVec;
 
 const GREP_MESSAGE: &str = "Use rg (ripgrep) instead of grep in this project. Replace blocked grep commands with the least invasive exact rg rewrite when the flag mapping is clear. If a flag does not have a guaranteed direct rg translation, translate it manually instead of guessing.";
 const EXACT_SUGGESTION_PREFIX: &str = "\nSuggested replacement:\n  ";
@@ -288,7 +289,7 @@ fn escape_json(value: &str) -> String {
 
 fn evaluate_command(command: &str) -> Option<BlockDecision> {
     let bytes = command.as_bytes();
-    let mut tokens = Vec::new();
+    let mut tokens = TokenBuffer::new();
     let mut token_start = None;
     let mut value: Option<Vec<u8>> = None;
     let mut in_single_quote = false;
@@ -403,6 +404,8 @@ struct ParsedToken<'a> {
     value: Cow<'a, str>,
 }
 
+type TokenBuffer<'a> = SmallVec<[ParsedToken<'a>; 8]>;
+
 fn ensure_owned_value<'a, 'b>(
     command: &'a str,
     token_start: usize,
@@ -417,7 +420,7 @@ fn flush_parsed_token<'a>(
     token_end: usize,
     token_start: &mut Option<usize>,
     value: &mut Option<Vec<u8>>,
-    tokens: &mut Vec<ParsedToken<'a>>,
+    tokens: &mut TokenBuffer<'a>,
 ) {
     let Some(start) = token_start.take() else {
         return;
@@ -434,7 +437,7 @@ fn flush_parsed_token<'a>(
     tokens.push(ParsedToken { raw, value });
 }
 
-fn evaluate_parsed_segment(tokens: &mut Vec<ParsedToken<'_>>) -> Option<BlockDecision> {
+fn evaluate_parsed_segment(tokens: &mut TokenBuffer<'_>) -> Option<BlockDecision> {
     if tokens.is_empty() {
         return None;
     }
