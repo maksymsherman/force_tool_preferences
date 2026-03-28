@@ -217,60 +217,13 @@ fn escape_json(value: &str) -> String {
 }
 
 fn evaluate_command(command: &str) -> Option<BlockDecision> {
-    for segment in parse_segments(command) {
-        if let Some(decision) = evaluate_segment(&segment.tokens) {
-            return Some(decision);
-        }
-    }
-
-    None
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ParsedToken {
-    raw: String,
-    value: String,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-struct ParsedSegment {
-    tokens: Vec<ParsedToken>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ParsedSegmentState {
-    SeekCommand,
-    SeekUvDecision,
-    PreserveSegment,
-    SkipSegment,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ParsedSegmentTracker {
-    state: ParsedSegmentState,
-    wrapper: Option<WrapperKind>,
-    skip_next_value: bool,
-}
-
-impl Default for ParsedSegmentTracker {
-    fn default() -> Self {
-        Self {
-            state: ParsedSegmentState::SeekCommand,
-            wrapper: None,
-            skip_next_value: false,
-        }
-    }
-}
-
-fn parse_segments(command: &str) -> Vec<ParsedSegment> {
     let bytes = command.as_bytes();
-    let mut segments = Vec::new();
-    let mut tokens = Vec::new();
+    let mut tokens = Vec::with_capacity(8);
     let mut raw = Vec::with_capacity(32);
     let mut value = Vec::with_capacity(32);
     let mut in_single_quote = false;
     let mut in_double_quote = false;
-    let mut tracker = ParsedSegmentTracker::default();
+    let mut tracker = EvaluationTracker::default();
     let mut index = 0usize;
 
     while index < bytes.len() {
@@ -314,10 +267,14 @@ fn parse_segments(command: &str) -> Vec<ParsedSegment> {
 
         match byte {
             b' ' | b'\n' | b'\r' | b'\t' => {
-                finish_parsed_token(&mut raw, &mut value, &mut tokens, &mut tracker);
-                if tracker.state == ParsedSegmentState::SkipSegment {
-                    flush_segment(&mut tokens, &mut segments);
-                    tracker = ParsedSegmentTracker::default();
+                if let Some(decision) =
+                    finish_evaluation_token(&mut raw, &mut value, &mut tokens, &mut tracker)
+                {
+                    return Some(decision);
+                }
+
+                if tracker.state == EvaluationState::SkipSegment {
+                    reset_evaluation_segment(&mut tokens, &mut tracker);
                     index = skip_segment_tail(
                         bytes,
                         index + 1,
@@ -336,14 +293,27 @@ fn parse_segments(command: &str) -> Vec<ParsedSegment> {
                 in_double_quote = true;
             }
             b';' => {
-                finish_parsed_token(&mut raw, &mut value, &mut tokens, &mut tracker);
-                flush_segment(&mut tokens, &mut segments);
-                tracker = ParsedSegmentTracker::default();
+                if let Some(decision) =
+                    finish_evaluation_token(&mut raw, &mut value, &mut tokens, &mut tracker)
+                {
+                    return Some(decision);
+                }
+
+                if let Some(decision) = finalize_evaluation_segment(&mut tokens, &mut tracker) {
+                    return Some(decision);
+                }
             }
             b'|' | b'&' => {
-                finish_parsed_token(&mut raw, &mut value, &mut tokens, &mut tracker);
-                flush_segment(&mut tokens, &mut segments);
-                tracker = ParsedSegmentTracker::default();
+                if let Some(decision) =
+                    finish_evaluation_token(&mut raw, &mut value, &mut tokens, &mut tracker)
+                {
+                    return Some(decision);
+                }
+
+                if let Some(decision) = finalize_evaluation_segment(&mut tokens, &mut tracker) {
+                    return Some(decision);
+                }
+
                 if index + 1 < bytes.len() && bytes[index + 1] == byte {
                     index += 1;
                 }
@@ -367,55 +337,108 @@ fn parse_segments(command: &str) -> Vec<ParsedSegment> {
         index += 1;
     }
 
-    finish_parsed_token(&mut raw, &mut value, &mut tokens, &mut tracker);
-    flush_segment(&mut tokens, &mut segments);
-    segments
+    if let Some(decision) = finish_evaluation_token(&mut raw, &mut value, &mut tokens, &mut tracker)
+    {
+        return Some(decision);
+    }
+
+    finalize_evaluation_segment(&mut tokens, &mut tracker)
 }
 
-fn finish_parsed_token(
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ParsedToken {
+    raw: String,
+    value: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EvaluationState {
+    SeekCommand,
+    SeekUvDecision,
+    PreserveSegment,
+    SkipSegment,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PendingDecisionKind {
+    Python { command_index: usize },
+    Pip { command_index: usize },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct EvaluationTracker {
+    state: EvaluationState,
+    wrapper: Option<WrapperKind>,
+    skip_next_value: bool,
+    pending_decision: Option<PendingDecisionKind>,
+}
+
+impl Default for EvaluationTracker {
+    fn default() -> Self {
+        Self {
+            state: EvaluationState::SeekCommand,
+            wrapper: None,
+            skip_next_value: false,
+            pending_decision: None,
+        }
+    }
+}
+
+fn finish_evaluation_token(
     raw: &mut Vec<u8>,
     value: &mut Vec<u8>,
     tokens: &mut Vec<ParsedToken>,
-    tracker: &mut ParsedSegmentTracker,
-) {
+    tracker: &mut EvaluationTracker,
+) -> Option<BlockDecision> {
     if raw.is_empty() {
-        return;
+        return None;
     }
 
-    update_segment_tracker(value, tracker);
+    let token_index = tokens.len();
+    if let Some(decision) = update_evaluation_tracker(value, tracker, token_index) {
+        raw.clear();
+        value.clear();
+        return Some(decision);
+    }
+
     tokens.push(ParsedToken {
         raw: String::from_utf8_lossy(raw).into_owned(),
         value: String::from_utf8_lossy(value).into_owned(),
     });
     raw.clear();
     value.clear();
+    None
 }
 
-fn update_segment_tracker(value: &[u8], tracker: &mut ParsedSegmentTracker) {
+fn update_evaluation_tracker(
+    value: &[u8],
+    tracker: &mut EvaluationTracker,
+    token_index: usize,
+) -> Option<BlockDecision> {
     match tracker.state {
-        ParsedSegmentState::PreserveSegment | ParsedSegmentState::SkipSegment => return,
-        ParsedSegmentState::SeekCommand if tracker.skip_next_value => {
+        EvaluationState::PreserveSegment | EvaluationState::SkipSegment => return None,
+        EvaluationState::SeekCommand if tracker.skip_next_value => {
             tracker.skip_next_value = false;
-            return;
+            return None;
         }
-        ParsedSegmentState::SeekUvDecision if tracker.skip_next_value => {
+        EvaluationState::SeekUvDecision if tracker.skip_next_value => {
             tracker.skip_next_value = false;
-            return;
+            return None;
         }
         _ => {}
     }
 
     match tracker.state {
-        ParsedSegmentState::SeekCommand => {
+        EvaluationState::SeekCommand => {
             if value.starts_with(b"-") {
                 if let Some(wrapper_kind) = tracker.wrapper {
                     tracker.skip_next_value = wrapper_option_takes_value(wrapper_kind, value);
                 }
-                return;
+                return None;
             }
 
             if is_shell_assignment(value) {
-                return;
+                return None;
             }
 
             match classify_token(value) {
@@ -423,36 +446,47 @@ fn update_segment_tracker(value: &[u8], tracker: &mut ParsedSegmentTracker) {
                     tracker.wrapper = wrapper_kind(value);
                 }
                 TokenKind::Uv => {
-                    tracker.state = ParsedSegmentState::SeekUvDecision;
+                    tracker.state = EvaluationState::SeekUvDecision;
                     tracker.wrapper = None;
                 }
                 TokenKind::Uvx | TokenKind::Other => {
-                    tracker.state = ParsedSegmentState::SkipSegment
+                    tracker.state = EvaluationState::SkipSegment;
                 }
-                TokenKind::PythonLike | TokenKind::PipLike => {
-                    tracker.state = ParsedSegmentState::PreserveSegment;
+                TokenKind::PythonLike => {
+                    tracker.state = EvaluationState::PreserveSegment;
+                    tracker.pending_decision = Some(PendingDecisionKind::Python {
+                        command_index: token_index,
+                    });
+                }
+                TokenKind::PipLike => {
+                    tracker.state = EvaluationState::PreserveSegment;
+                    tracker.pending_decision = Some(PendingDecisionKind::Pip {
+                        command_index: token_index,
+                    });
                 }
             }
         }
-        ParsedSegmentState::SeekUvDecision => {
+        EvaluationState::SeekUvDecision => {
             if value.starts_with(b"-") {
                 tracker.skip_next_value = uv_option_takes_value(value);
-                return;
+                return None;
             }
 
             if is_shell_assignment(value) {
-                return;
+                return None;
             }
 
             let name = normalized_program_name(value);
             if name == b"init" {
-                tracker.state = ParsedSegmentState::PreserveSegment;
-            } else {
-                tracker.state = ParsedSegmentState::SkipSegment;
+                return Some(BlockDecision::new(UV_INIT_MESSAGE));
             }
+
+            tracker.state = EvaluationState::SkipSegment;
         }
-        ParsedSegmentState::PreserveSegment | ParsedSegmentState::SkipSegment => {}
+        EvaluationState::PreserveSegment | EvaluationState::SkipSegment => {}
     }
+
+    None
 }
 
 #[cold]
@@ -522,86 +556,27 @@ fn skip_segment_tail(
     index
 }
 
-fn flush_segment(tokens: &mut Vec<ParsedToken>, segments: &mut Vec<ParsedSegment>) {
-    if tokens.is_empty() {
-        return;
-    }
+fn finalize_evaluation_segment(
+    tokens: &mut Vec<ParsedToken>,
+    tracker: &mut EvaluationTracker,
+) -> Option<BlockDecision> {
+    let decision = match tracker.pending_decision.take() {
+        Some(PendingDecisionKind::Python { command_index }) => {
+            Some(build_python_decision(tokens, command_index))
+        }
+        Some(PendingDecisionKind::Pip { command_index }) => {
+            Some(build_pip_decision(tokens, command_index))
+        }
+        None => None,
+    };
 
-    segments.push(ParsedSegment {
-        tokens: std::mem::take(tokens),
-    });
+    reset_evaluation_segment(tokens, tracker);
+    decision
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SegmentState {
-    SeekCommand,
-    SeekUvDecision,
-}
-
-fn evaluate_segment(tokens: &[ParsedToken]) -> Option<BlockDecision> {
-    let mut state = SegmentState::SeekCommand;
-    let mut wrapper = None;
-    let mut skip_next_value = false;
-
-    for (index, token) in tokens.iter().enumerate() {
-        let value = token.value.as_bytes();
-
-        if skip_next_value {
-            skip_next_value = false;
-            continue;
-        }
-
-        match state {
-            SegmentState::SeekCommand => {
-                if value.starts_with(b"-") {
-                    if let Some(wrapper_kind) = wrapper {
-                        skip_next_value = wrapper_option_takes_value(wrapper_kind, value);
-                    }
-                    continue;
-                }
-
-                if is_shell_assignment(value) {
-                    continue;
-                }
-
-                match classify_token(value) {
-                    TokenKind::Wrapper => {
-                        wrapper = wrapper_kind(value);
-                    }
-                    TokenKind::Uv => {
-                        state = SegmentState::SeekUvDecision;
-                        wrapper = None;
-                    }
-                    TokenKind::Uvx | TokenKind::Other => return None,
-                    TokenKind::PythonLike => return Some(build_python_decision(tokens, index)),
-                    TokenKind::PipLike => return Some(build_pip_decision(tokens, index)),
-                }
-            }
-            SegmentState::SeekUvDecision => {
-                if value.starts_with(b"-") {
-                    skip_next_value = uv_option_takes_value(value);
-                    continue;
-                }
-
-                if is_shell_assignment(value) {
-                    continue;
-                }
-
-                let name = normalized_program_name(value);
-                if name == b"init" {
-                    return Some(BlockDecision::new(UV_INIT_MESSAGE));
-                }
-
-                if is_known_safe_uv_subcommand(name) {
-                    return None;
-                }
-
-                return None;
-            }
-        }
-    }
-
-    None
+fn reset_evaluation_segment(tokens: &mut Vec<ParsedToken>, tracker: &mut EvaluationTracker) {
+    tokens.clear();
+    *tracker = EvaluationTracker::default();
 }
 
 fn build_python_decision(tokens: &[ParsedToken], command_index: usize) -> BlockDecision {
@@ -958,29 +933,6 @@ fn is_shell_assignment(token: &[u8]) -> bool {
     head[1..]
         .iter()
         .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-}
-
-fn is_known_safe_uv_subcommand(token: &[u8]) -> bool {
-    matches!(
-        token,
-        b"add"
-            | b"auth"
-            | b"build"
-            | b"cache"
-            | b"export"
-            | b"help"
-            | b"lock"
-            | b"pip"
-            | b"publish"
-            | b"python"
-            | b"remove"
-            | b"run"
-            | b"sync"
-            | b"tool"
-            | b"tree"
-            | b"venv"
-            | b"version"
-    )
 }
 
 fn extract_claude_command(input: &str) -> Result<String, String> {
