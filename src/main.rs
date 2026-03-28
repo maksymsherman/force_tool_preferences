@@ -8,6 +8,7 @@ use std::time::Instant;
 use serde_json::{json, Map, Value};
 
 const GREP_MESSAGE: &str = "Use rg (ripgrep) instead of grep in this project. Replace blocked grep commands with the least invasive exact rg rewrite when the flag mapping is clear. If a flag does not have a guaranteed direct rg translation, translate it manually instead of guessing.";
+const EXACT_SUGGESTION_PREFIX: &str = "\nSuggested replacement:\n  ";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct BlockDecision {
@@ -491,9 +492,7 @@ fn evaluate_segment(tokens: &[ParsedToken<'_>]) -> Option<BlockDecision> {
 
 fn build_grep_decision(tokens: &[ParsedToken<'_>], command_index: usize) -> BlockDecision {
     match rewrite_grep_to_rg(tokens, command_index) {
-        GrepRewrite::Exact(suggestion) => {
-            BlockDecision::new(format_exact_suggestion(GREP_MESSAGE, &suggestion))
-        }
+        GrepRewrite::Exact(message) => BlockDecision::new(message),
         GrepRewrite::NeedsManualTranslation { flags } => {
             BlockDecision::new(format_manual_translation_message(GREP_MESSAGE, &flags))
         }
@@ -515,10 +514,15 @@ fn rewrite_grep_to_rg(tokens: &[ParsedToken<'_>], command_index: usize) -> GrepR
         .iter()
         .map(|token| token.raw.len() + 1)
         .sum::<usize>()
+        + GREP_MESSAGE.len()
+        + EXACT_SUGGESTION_PREFIX.len()
         + 4;
     let mut suggestion = String::with_capacity(estimated_len);
     let mut uncertain_flags = Vec::new();
     let mut has_parts = false;
+
+    suggestion.push_str(GREP_MESSAGE);
+    suggestion.push_str(EXACT_SUGGESTION_PREFIX);
 
     // Preserve wrapper tokens before the command.
     for token in &tokens[..command_index] {
@@ -735,10 +739,6 @@ fn is_safe_value_short_grep_flag(byte: u8) -> bool {
 fn is_safe_attached_numeric_short_flag(flag: &[u8]) -> bool {
     matches!(flag, [b'-', b'A' | b'B' | b'C' | b'm', rest @ ..] if !rest.is_empty()
         && rest.iter().all(|byte| byte.is_ascii_digit()))
-}
-
-fn format_exact_suggestion(base: &str, suggestion: &str) -> String {
-    format!("{base}\nSuggested replacement:\n  {suggestion}")
 }
 
 fn format_manual_translation_message(base: &str, flags: &[String]) -> String {
@@ -1319,8 +1319,10 @@ mod tests {
     #[test]
     fn blocks_grep() {
         let message = decision_message("grep -rn pattern .");
-        assert!(message.contains(GREP_MESSAGE));
-        assert!(message.contains("rg pattern ."));
+        assert_eq!(
+            message,
+            format!("{GREP_MESSAGE}\nSuggested replacement:\n  rg pattern .")
+        );
     }
 
     #[test]
@@ -1404,9 +1406,15 @@ mod tests {
     #[test]
     fn requires_manual_translation_for_uncertain_flags() {
         let message = decision_message("grep -s pattern file.txt");
-        assert!(message.contains("Flags requiring manual translation"));
-        assert!(message.contains("\n  -s"));
-        assert!(!message.contains("Suggested replacement:"));
+        assert_eq!(
+            message,
+            concat!(
+                "Use rg (ripgrep) instead of grep in this project. Replace blocked grep commands with the least invasive exact rg rewrite when the flag mapping is clear. If a flag does not have a guaranteed direct rg translation, translate it manually instead of guessing.\n",
+                "Flags requiring manual translation before switching to rg:\n",
+                "  -s\n",
+                "Translate those flags manually after checking `rg --help` instead of assuming they behave the same.",
+            )
+        );
 
         let message = decision_message("grep -h pattern file.txt");
         assert!(message.contains("\n  -h"));
