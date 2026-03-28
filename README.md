@@ -121,16 +121,21 @@ The Rust binary handles hard blocking and JSON hook integration. The shipped `AG
 
 ## Performance
 
-`force_rg` is meant to stay enabled in the hook path, so evaluator overhead matters.
+`force_rg` is meant to stay enabled in the hook path, so there are two different numbers worth understanding:
 
-Using the built-in benchmark mode on a release build of `enforce-rg-command`:
+1. The matcher cost inside an already-running process
+2. The actual wall time of invoking the hook as a subprocess
+
+### Matcher Cost
+
+Sample measurements from the built-in benchmark mode on one machine with a release build of `enforce-rg-command`:
 
 | Case | Example input | Average per evaluation |
 |---|---|---:|
-| Allowed command | `rg TODO .` | `0.0889 us` (`0.0000000889 s`) |
-| Blocked command | `grep -rn TODO .` | `0.2074 us` (`0.0000002074 s`) |
+| Allowed command | `rg TODO .` | `0.0562 us` (`0.0000000562 s`) |
+| Blocked command | `grep -rn TODO .` | `0.1438 us` (`0.0000001438 s`) |
 
-These numbers measure the command evaluator inside the binary. End-to-end hook wall time will be higher because shell startup, process startup, and agent hook plumbing sit outside this benchmark.
+These numbers measure only the command evaluator inside the binary.
 
 Reproduce locally:
 
@@ -144,6 +149,19 @@ cargo build --release
   --benchmark-command 'grep -rn TODO .' \
   --iterations 5000000
 ```
+
+### Practical Hook Wall Time
+
+Warm-cache sample measurements from one machine, estimated by batching 200 invocations and dividing the total wall time back down to a per-hook figure:
+
+| Path | Example input | Approximate wall time per hook |
+|---|---|---:|
+| Direct CLI allow | `--command 'rg TODO .'` | `3.7 ms` |
+| Direct CLI block | `--command 'grep -rn TODO .'` | `3.7 ms` |
+| Stdin command block | `--stdin-command` with `grep -rn TODO .` | `4.0 ms` |
+| Claude hook JSON block | `--claude-hook-json` with `tool_input.command` | `4.8 ms` |
+
+That practical number is what matters in agent use. The gap between the microbenchmark and the real hook cost comes from shell startup, process startup, CLI parsing, stdin reads, JSON parsing, output formatting, and pipe plumbing. Results will vary across machines, but the overall shape is the same: the evaluator itself is effectively free, while the subprocess hook architecture costs low single-digit milliseconds per invocation.
 
 ## Comparison
 

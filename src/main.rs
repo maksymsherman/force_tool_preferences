@@ -503,11 +503,13 @@ fn evaluate_segment(tokens: &[ParsedToken<'_>]) -> Option<BlockDecision> {
                 }
 
                 match classify_token(value) {
-                    TokenKind::Wrapper => {
-                        wrapper = wrapper_kind(value);
+                    TokenKind::Wrapper(kind) => {
+                        wrapper = Some(kind);
                     }
                     TokenKind::Rg => return None,
-                    TokenKind::GrepLike => return Some(build_grep_decision(tokens, index)),
+                    TokenKind::GrepLike(kind) => {
+                        return Some(build_grep_decision(tokens, index, kind));
+                    }
                     TokenKind::Other => {
                         if is_shell_assignment(value) {
                             continue;
@@ -523,8 +525,12 @@ fn evaluate_segment(tokens: &[ParsedToken<'_>]) -> Option<BlockDecision> {
     None
 }
 
-fn build_grep_decision(tokens: &[ParsedToken<'_>], command_index: usize) -> BlockDecision {
-    match rewrite_grep_to_rg(tokens, command_index) {
+fn build_grep_decision(
+    tokens: &[ParsedToken<'_>],
+    command_index: usize,
+    grep_kind: GrepKind,
+) -> BlockDecision {
+    match rewrite_grep_to_rg(tokens, command_index, grep_kind) {
         GrepRewrite::Exact(message) => BlockDecision::new(message),
         GrepRewrite::NeedsManualTranslation { flags } => {
             BlockDecision::new(format_manual_translation_message(GREP_MESSAGE, &flags))
@@ -540,9 +546,12 @@ enum GrepRewrite {
 /// Rewrite a grep/egrep/fgrep command to the equivalent rg command when the
 /// mapping is high confidence. Otherwise return the flags that need manual
 /// translation before switching to rg.
-fn rewrite_grep_to_rg(tokens: &[ParsedToken<'_>], command_index: usize) -> GrepRewrite {
-    let cmd_name = normalized_program_name(tokens[command_index].value.as_bytes());
-    let is_fgrep = cmd_name == b"fgrep";
+fn rewrite_grep_to_rg(
+    tokens: &[ParsedToken<'_>],
+    command_index: usize,
+    grep_kind: GrepKind,
+) -> GrepRewrite {
+    let is_fgrep = matches!(grep_kind, GrepKind::Fgrep);
     let estimated_len = tokens
         .iter()
         .map(|token| token.raw.len() + 1)
@@ -797,16 +806,11 @@ enum WrapperKind {
     Builtin,
 }
 
-fn wrapper_kind(token: &[u8]) -> Option<WrapperKind> {
-    match normalized_program_name(token) {
-        b"sudo" => Some(WrapperKind::Sudo),
-        b"env" => Some(WrapperKind::Env),
-        b"command" => Some(WrapperKind::Command),
-        b"time" => Some(WrapperKind::Time),
-        b"nohup" => Some(WrapperKind::Nohup),
-        b"builtin" => Some(WrapperKind::Builtin),
-        _ => None,
-    }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GrepKind {
+    Grep,
+    Egrep,
+    Fgrep,
 }
 
 fn wrapper_option_takes_value(kind: WrapperKind, token: &[u8]) -> bool {
@@ -842,18 +846,24 @@ fn wrapper_option_takes_value(kind: WrapperKind, token: &[u8]) -> bool {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum TokenKind {
-    Wrapper,
+    Wrapper(WrapperKind),
     Rg,
-    GrepLike,
+    GrepLike(GrepKind),
     Other,
 }
 
 fn classify_token(token: &[u8]) -> TokenKind {
-    let name = normalized_program_name(token);
-    match name {
+    match normalized_program_name(token) {
         b"rg" | b"ripgrep" => TokenKind::Rg,
-        b"sudo" | b"env" | b"command" | b"nohup" | b"time" | b"builtin" => TokenKind::Wrapper,
-        _ if is_grep_name(name) => TokenKind::GrepLike,
+        b"sudo" => TokenKind::Wrapper(WrapperKind::Sudo),
+        b"env" => TokenKind::Wrapper(WrapperKind::Env),
+        b"command" => TokenKind::Wrapper(WrapperKind::Command),
+        b"nohup" => TokenKind::Wrapper(WrapperKind::Nohup),
+        b"time" => TokenKind::Wrapper(WrapperKind::Time),
+        b"builtin" => TokenKind::Wrapper(WrapperKind::Builtin),
+        b"grep" => TokenKind::GrepLike(GrepKind::Grep),
+        b"egrep" => TokenKind::GrepLike(GrepKind::Egrep),
+        b"fgrep" => TokenKind::GrepLike(GrepKind::Fgrep),
         _ => TokenKind::Other,
     }
 }
@@ -876,10 +886,6 @@ fn strip_exe_suffix(token: &[u8]) -> &[u8] {
     } else {
         token
     }
-}
-
-fn is_grep_name(name: &[u8]) -> bool {
-    matches!(name, b"grep" | b"egrep" | b"fgrep")
 }
 
 fn is_shell_assignment(token: &[u8]) -> bool {
