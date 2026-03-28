@@ -100,6 +100,33 @@ The implementation is a single Rust binary with no runtime service. It is design
 
 `uv init` is useful for project creation, but risky inside an existing repo. `force_uv` blocks it by default and points users toward the safer `uv` commands they usually wanted in the first place.
 
+## Performance
+
+`force_uv` is meant to stay enabled in the hook path, so evaluator overhead matters.
+
+On a release build of `enforce-uv-command` running on a Linux KVM VM with 12 vCPUs (`AMD EPYC Processor (with IBPB)`), the built-in benchmark mode measured:
+
+| Case | Example input | Total time | Average per evaluation |
+|---|---|---:|---:|
+| Allowed command | `uv run pytest` | `1.6896 s` | `0.3379 us` |
+| Blocked command | `python -m pytest` | `3.3901 s` | `0.6780 us` |
+
+These numbers measure the command evaluator inside the binary. End-to-end hook wall time will be higher because shell startup, process startup, and agent hook plumbing sit outside this benchmark.
+
+Reproduce locally:
+
+```sh
+cargo build --release
+
+./target/release/enforce-uv-command \
+  --benchmark-command 'uv run pytest' \
+  --iterations 5000000
+
+./target/release/enforce-uv-command \
+  --benchmark-command 'python -m pytest' \
+  --iterations 5000000
+```
+
 ## Comparison
 
 | Approach | Actually blocks bad shell commands | Suggests specific rewrites | Works across multiple agent tools | Keeps ambiguity explicit |
