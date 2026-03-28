@@ -102,16 +102,21 @@ The implementation is a single Rust binary with no runtime service. It is design
 
 ## Performance
 
-`force_uv` is meant to stay enabled in the hook path, so evaluator overhead matters.
+`force_uv` is meant to stay enabled in the hook path, so there are two different numbers worth understanding:
 
-Using the built-in benchmark mode on a release build of `enforce-uv-command`:
+1. The evaluator cost inside an already-running process
+2. The actual wall time of invoking the hook as a subprocess
+
+### Evaluator Cost
+
+Sample measurements from repeated built-in benchmark runs on one machine with a release build of `enforce-uv-command`:
 
 | Case | Example input | Average per evaluation |
 |---|---|---:|
-| Allowed command | `uv run pytest` | `0.3161 us` (`0.0000003161 s`) |
-| Blocked command | `python -m pytest` | `0.3622 us` (`0.0000003622 s`) |
+| Allowed command | `uv run pytest` | `0.2765 us` (`0.0000002765 s`) |
+| Blocked command | `python -m pytest` | `0.3729 us` (`0.0000003729 s`) |
 
-These numbers measure the command evaluator inside the binary. End-to-end hook wall time will be higher because shell startup, process startup, and agent hook plumbing sit outside this benchmark.
+These numbers measure only the command evaluator inside the binary.
 
 Reproduce locally:
 
@@ -126,6 +131,19 @@ cargo build --release
   --benchmark-command 'python -m pytest' \
   --iterations 5000000
 ```
+
+### Practical Hook Wall Time
+
+Warm-cache sample measurements from one machine, estimated by batching 200 invocations and dividing the total wall time back down to a per-hook figure:
+
+| Path | Example input | Approximate wall time per hook |
+|---|---|---:|
+| Direct CLI allow | `--command 'uv run pytest'` | `3.4 ms` |
+| Direct CLI block | `--command 'python -m pytest'` | `3.2 ms` |
+| Stdin command block | `--stdin-command` with `python -m pytest` | `4.6 ms` |
+| Claude hook JSON block | `--claude-hook-json` with `tool_input.command` | `4.4 ms` |
+
+That practical number is what matters in agent use. The gap between the microbenchmark and the real hook cost comes from shell startup, process startup, CLI parsing, stdin reads, JSON parsing, output formatting, and pipe plumbing. Results will vary across machines, but the overall shape is the same: the evaluator itself is effectively free, while the subprocess hook architecture costs low single-digit milliseconds per invocation.
 
 ## Comparison
 
