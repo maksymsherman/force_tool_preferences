@@ -288,6 +288,12 @@ fn escape_json(value: &str) -> String {
 }
 
 fn evaluate_command(command: &str) -> Option<BlockDecision> {
+    // Simple commands never trigger quote/escape/segment parsing, so splitting on
+    // ASCII shell whitespace preserves the existing token semantics at lower cost.
+    if is_simple_command(command) {
+        return evaluate_simple_command(command);
+    }
+
     let bytes = command.as_bytes();
     let mut tokens = TokenBuffer::new();
     let mut token_start = None;
@@ -396,6 +402,28 @@ fn evaluate_command(command: &str) -> Option<BlockDecision> {
         &mut tokens,
     );
     evaluate_parsed_segment(&mut tokens)
+}
+
+fn is_simple_command(command: &str) -> bool {
+    !command.as_bytes().iter().any(|byte| {
+        matches!(
+            byte,
+            b'\'' | b'"' | b'\\' | b';' | b'|' | b'&' | b'\n' | b'\r' | b'\t'
+        )
+    })
+}
+
+fn evaluate_simple_command(command: &str) -> Option<BlockDecision> {
+    let mut tokens = TokenBuffer::new();
+
+    for raw in command.split_ascii_whitespace() {
+        tokens.push(ParsedToken {
+            raw,
+            value: Cow::Borrowed(raw),
+        });
+    }
+
+    evaluate_segment(&tokens)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
