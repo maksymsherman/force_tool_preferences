@@ -610,8 +610,8 @@ fn escape_json(value: &str) -> String {
 }
 
 fn evaluate_command(command: &str, rules: RuleSet) -> Option<BlockDecision> {
-    if is_simple_command(command) {
-        return evaluate_simple_command(command, rules);
+    if let Ok(decision) = try_evaluate_simple_command(command, rules) {
+        return decision;
     }
 
     let bytes = command.as_bytes();
@@ -724,26 +724,40 @@ fn evaluate_command(command: &str, rules: RuleSet) -> Option<BlockDecision> {
     evaluate_parsed_segment(&mut tokens, rules)
 }
 
-fn is_simple_command(command: &str) -> bool {
-    !command.as_bytes().iter().any(|byte| {
-        matches!(
-            byte,
-            b'\'' | b'"' | b'\\' | b';' | b'|' | b'&' | b'\n' | b'\r' | b'\t'
-        )
-    })
-}
-
-fn evaluate_simple_command(command: &str, rules: RuleSet) -> Option<BlockDecision> {
+fn try_evaluate_simple_command(command: &str, rules: RuleSet) -> Result<Option<BlockDecision>, ()> {
     let mut tokens = TokenBuffer::new();
+    let bytes = command.as_bytes();
+    let mut token_start = None;
 
-    for raw in command.split_ascii_whitespace() {
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        match byte {
+            b' ' => {
+                if let Some(start) = token_start.take() {
+                    let raw = &command[start..index];
+                    tokens.push(ParsedToken {
+                        raw,
+                        value: Cow::Borrowed(raw),
+                    });
+                }
+            }
+            b'\'' | b'"' | b'\\' | b';' | b'|' | b'&' | b'\n' | b'\r' | b'\t' => {
+                return Err(());
+            }
+            _ => {
+                token_start.get_or_insert(index);
+            }
+        }
+    }
+
+    if let Some(start) = token_start {
+        let raw = &command[start..];
         tokens.push(ParsedToken {
             raw,
             value: Cow::Borrowed(raw),
         });
     }
 
-    evaluate_segment(&tokens, rules)
+    Ok(evaluate_segment(&tokens, rules))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -858,9 +872,9 @@ fn evaluate_segment(tokens: &[ParsedToken<'_>], rules: RuleSet) -> Option<BlockD
 
 fn build_python_decision(tokens: &[ParsedToken<'_>], command_index: usize) -> BlockDecision {
     let suggestion = insert_before_command(tokens, command_index, &["uv", "run"]);
-    BlockDecision::new(format_exact_suggestion(
+    BlockDecision::new(into_exact_suggestion_message(
         rule_spec(RuleId::Uv).guidance,
-        &suggestion,
+        suggestion,
     ))
 }
 
@@ -1031,6 +1045,15 @@ fn format_exact_suggestion(base: &str, suggestion: &str) -> String {
     format!("{base}\nSuggested replacement:\n  {suggestion}")
 }
 
+fn into_exact_suggestion_message(base: &str, mut suggestion: String) -> String {
+    const EXACT_SUGGESTION_PREFIX: &str = "\nSuggested replacement:\n  ";
+
+    suggestion.reserve(base.len() + EXACT_SUGGESTION_PREFIX.len());
+    suggestion.insert_str(0, EXACT_SUGGESTION_PREFIX);
+    suggestion.insert_str(0, base);
+    suggestion
+}
+
 fn format_alternative_suggestions(
     base: &str,
     suggestions: &[String],
@@ -1094,9 +1117,9 @@ fn build_grep_decision(
     grep_kind: GrepKind,
 ) -> BlockDecision {
     match rewrite_grep_to_rg(tokens, command_index, grep_kind) {
-        GrepRewrite::Exact(suggestion) => BlockDecision::new(format_exact_suggestion(
+        GrepRewrite::Exact(suggestion) => BlockDecision::new(into_exact_suggestion_message(
             rule_spec(RuleId::Ripgrep).guidance,
-            &suggestion,
+            suggestion,
         )),
         GrepRewrite::NeedsManualTranslation { flags } => BlockDecision::new(
             format_manual_translation_message(rule_spec(RuleId::Ripgrep).guidance, &flags),
