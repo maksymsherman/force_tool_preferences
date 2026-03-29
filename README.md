@@ -1,18 +1,28 @@
 # force_tool_preferences
 
 ```text
-grep / python / pip
-         |
-         v
-+----------------------------------+
-| enforce-tool-preferences-command |
-+----------------------------------+
-     | allow              | block
-     v                    v
-  continue        suggest rg / uv rewrite
+grep / egrep / fgrep        python / pip / uv init
+          \                         /
+           \                       /
+            +-- force_tool_preferences --+
+                         |
+                         v
+          enforce-tool-preferences-command
+                         |
+              allow or block with rewrite
 ```
 
-Single-process shell-hook enforcement for preferred CLI tools in Codex, Claude Code, and Gemini.
+<div align="center">
+
+[![Rust 2021](https://img.shields.io/badge/Rust-2021-orange?logo=rust)](https://www.rust-lang.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![ripgrep First](https://img.shields.io/badge/search-rg%20first-cc5500)](https://github.com/BurntSushi/ripgrep)
+[![uv First](https://img.shields.io/badge/python-uv%20first-4B8BBE)](https://docs.astral.sh/uv/)
+[![Agents](https://img.shields.io/badge/Agents-Claude%20Code%20%7C%20Gemini%20%7C%20Codex-blue)](#installation)
+
+Single-process shell-hook enforcement for preferred CLI tools in Codex, Claude Code, and Gemini. `force_tool_preferences` combines the old `force_rg` and `force_uv` flows into one Rust binary, one hook command, and one installer.
+
+</div>
 
 Quick install:
 
@@ -20,56 +30,36 @@ Quick install:
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh | bash
 ```
 
-By default, the installer enables both rule families:
-
-- `grep` / `egrep` / `fgrep` -> `rg`
-- `python` / `python3` / `pip` / `pip3` -> `uv`
+The installer builds `enforce-tool-preferences-command`, installs it to `~/.local/bin/`, enables both rule families by default, and configures agent hooks where possible. It can also scope installation to just `rg` or just `uv` rules. It requires `cargo`, plus `rg` when `rg` rules are enabled and `uv` when `uv` rules are enabled.
 
 ## TL;DR
 
 ### The Problem
 
-Prompt-only tool preferences drift. Agents fall back to `grep`, `python`, or `pip`, and each separate hook adds its own process startup cost.
+Prompt-only tool preferences drift. Agents fall back to `grep`, `python`, or `pip`, and separate per-tool hooks add repeated process startup, repeated config management, and repeated places for policy to get out of sync.
 
 ### The Solution
 
-`force_tool_preferences` consolidates those checks into one Rust binary and one hook process. It blocks disallowed commands, suggests the least invasive rewrite when confidence is high, and lets you install either both rule families or only the subset you want.
+`force_tool_preferences` evaluates shell commands before execution and enforces both current rule families in one process:
 
-### Why Use It?
+- `grep` / `egrep` / `fgrep` -> `rg`
+- bare `python*` / `pip*` -> `uv`
+- `uv init` in an existing repo workflow -> blocked with safer guidance
 
-| Capability | What it does |
-|---|---|
-| One hook process | Replaces separate hook binaries for `rg` and `uv` enforcement |
-| Exact rewrites when obvious | `grep -rn TODO .` -> `rg TODO .`, `python -m pytest` -> `uv run python -m pytest` |
-| Honest ambiguity handling | `pip install requests` suggests both `uv add` and `uv pip install` |
-| Selective installation | Default is both rules, but `--only-rg` and `--only-uv` are supported |
-| Rule-aware hook updates | Reinstalling with a different selection updates the existing hook instead of appending duplicates |
+When the mapping is obvious, it suggests the least invasive exact rewrite. When semantics are unclear, it blocks and tells you to translate manually instead of guessing.
 
-## Quick Example
+### Why Use `force_tool_preferences`?
 
-```sh
-# Default install: enable both rg and uv enforcement
-curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
-  | bash
+| Feature | What it does | Why it matters |
+|---|---|---|
+| One hook process | Replaces separate `rg` and `uv` hook binaries with one evaluator | Reduces repeated subprocess overhead and config drift |
+| Exact rewrites | `grep -rn TODO .` becomes `rg TODO .`; `python -m pytest` becomes `uv run python -m pytest` | Keeps suggestions predictable and minimal |
+| Honest ambiguity handling | `pip install requests` suggests both `uv add requests` and `uv pip install requests` | Avoids pretending project metadata changes and environment mutations are the same thing |
+| Wrapper-aware parsing | Preserves `sudo`, `env`, `command`, `time`, `nohup`, `builtin`, assignments, pipes, and chained commands | Works on real shell commands instead of just toy examples |
+| Selective rule families | Installer and hooks support `--rules rg`, `--rules uv`, and `--rules rg,uv` | Lets you adopt one policy family without carrying the other |
+| Rule-aware hook updates | Reinstalling with a different rule selection updates the existing hook entry instead of appending duplicates | Keeps agent config clean over time |
 
-# Install only grep-family -> rg enforcement
-curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
-  | bash -s -- --only-rg
-
-# Install only python/pip-family -> uv enforcement
-curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
-  | bash -s -- --only-uv
-
-# Direct CLI evaluation
-enforce-tool-preferences-command --command 'grep -rn TODO .'
-enforce-tool-preferences-command --command 'python -m pytest'
-
-# Limit evaluation to one rule family
-enforce-tool-preferences-command --command 'python -m pytest' --rules uv
-enforce-tool-preferences-command --command 'grep -rn TODO .' --rules rg
-```
-
-Representative outcomes:
+Common outcomes:
 
 | Input | Result |
 |---|---|
@@ -77,102 +67,251 @@ Representative outcomes:
 | `fgrep literal README.md` | suggest `rg -F literal README.md` |
 | `python -m pytest` | suggest `uv run python -m pytest` |
 | `pip install requests` | suggest `uv add requests` and `uv pip install requests` |
-| `uv init` | blocked with safer guidance |
+| `pip uninstall requests` | suggest `uv remove requests` and `uv pip uninstall requests` |
+| `uv init` | blocked with safer `uv` guidance |
 | `grep -s TODO file.txt` | blocked for manual translation |
 
-## Installer Modes
-
-The installer always installs the same binary, `enforce-tool-preferences-command`. What changes is which rule families the configured hooks enable.
-
-| Mode | Command | Effect |
-|---|---|---|
-| Default | `install.sh` | Enable both `rg` and `uv` rules |
-| `rg` only | `install.sh --only-rg` | Enable only grep-family -> `rg` enforcement |
-| `uv` only | `install.sh --only-uv` | Enable only python/pip-family -> `uv` enforcement |
-| Explicit | `install.sh --rules rg`, `--rules uv`, `--rules rg,uv` | Same behavior, but scriptable |
-
-The installer:
-
-1. Clones the repo.
-2. Builds the release binary.
-3. Installs or updates `~/.local/bin/enforce-tool-preferences-command`.
-4. Configures Claude Code, Gemini CLI, and Codex hooks when their config paths exist.
-5. Writes hook commands with the selected `--rules` value.
-
-## CLI
-
-### Evaluate a command
+## Quick Example
 
 ```sh
+# Inspect the installer without cloning, building, or writing anything.
+curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
+  | bash -s -- --dry-run
+
+# Default install: enable both rg and uv enforcement.
+curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
+  | bash
+
+# Install only grep-family -> rg enforcement.
+curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
+  | bash -s -- --only-rg
+
+# Direct CLI evaluation.
 enforce-tool-preferences-command --command 'grep -rn TODO .'
 enforce-tool-preferences-command --command 'python -m pytest'
-enforce-tool-preferences-command --stdin-command
-```
+enforce-tool-preferences-command --command 'pip install requests'
 
-### Evaluate hook JSON
-
-```sh
-printf '%s' '{"tool_input":{"command":"pip install requests"}}' \
-  | enforce-tool-preferences-command --codex-hook-json
-```
-
-### Restrict active rule families
-
-```sh
+# Limit evaluation to one rule family.
 enforce-tool-preferences-command --command 'grep -rn TODO .' --rules rg
 enforce-tool-preferences-command --command 'python -m pytest' --rules uv
-enforce-tool-preferences-command --command 'pip install requests' --rules rg,uv
-```
 
-### Benchmark matcher cost
+# Codex or Claude hook JSON input.
+printf '%s' '{"tool_input":{"command":"grep -rn TODO ."}}' \
+  | enforce-tool-preferences-command --codex-hook-json --rules rg,uv
 
-```sh
+# Benchmark the evaluator locally.
 enforce-tool-preferences-command \
-  --benchmark-command 'grep -rn TODO .' \
+  --benchmark-command 'python -m pytest' \
   --iterations 100000 \
   --rules rg,uv
 ```
 
-Behavior:
+Representative outputs:
 
-- allowed commands exit `0`
-- blocked direct CLI commands exit `2`
-- invalid usage exits `1`
+```text
+Use rg (ripgrep) instead of grep in this project. Replace blocked grep commands with the least invasive exact rg rewrite when the flag mapping is clear. If a flag does not have a guaranteed direct rg translation, translate it manually instead of guessing.
+Suggested replacement:
+  rg TODO .
+```
+
+```text
+Use uv instead of bare Python or pip commands in this project. Replace the blocked command with 'uv run ...', 'uv add ...', 'uv add --dev ...', 'uv remove ...', or 'uv run --with ...' as appropriate.
+Likely alternatives:
+  uv add requests
+  uv pip install requests
+Choose `uv add` for project dependencies; choose `uv pip` to keep pip-style behavior.
+```
+
+```json
+{"decision":"block","reason":"Use rg (ripgrep) instead of grep in this project. Replace blocked grep commands with the least invasive exact rg rewrite when the flag mapping is clear. If a flag does not have a guaranteed direct rg translation, translate it manually instead of guessing.\nSuggested replacement:\n  rg TODO ."}
+```
+
+## Current Rules
+
+### grep-family -> `rg`
+
+Blocked commands:
+
+- `grep`
+- `egrep`
+- `fgrep`
+
+High-confidence rewrites stay small:
+
+- `grep -rn pattern .` -> `rg pattern .`
+- `grep -E 'foo|bar' file.txt` -> `rg 'foo|bar' file.txt`
+- `fgrep literal file.txt` -> `rg -F literal file.txt`
+- `sudo grep -rl TODO /var/log` -> `sudo rg -l TODO /var/log`
+
+If a flag does not have a guaranteed direct `rg` translation, the command is blocked and the flagged options are listed explicitly.
+
+### python-family -> `uv`
+
+Blocked commands:
+
+- bare `python`
+- bare `python3`, `python3.11`, and similar versioned `python*` executables
+- bare `pip`
+- bare `pip3`, `pip3.12`, and similar versioned `pip*` executables
+- `uv init` in an existing-project workflow
+
+Typical outcomes:
+
+- `python script.py` -> `uv run python script.py`
+- `python -m pytest` -> `uv run python -m pytest`
+- `pip list` -> `uv pip list`
+- `pip install requests` -> `uv add requests` or `uv pip install requests`
+- `pip uninstall requests` -> `uv remove requests` or `uv pip uninstall requests`
+- `uv init` -> blocked with guidance toward `uv run`, `uv add`, `uv sync`, or `uv run --with`
+
+## Design Philosophy
+
+### 1. One Hook Boundary, Multiple Policies
+
+The hook boundary is where enforcement actually matters, so the combined binary owns both current rule families. Adding another family later should extend the dispatcher, not add another long-lived pile of hooks.
+
+### 2. Smallest Correct Rewrite
+
+If the preferred tool already implies a flag, the suggestion drops the redundant noise. `grep -rn pattern .` becomes `rg pattern .`, not `rg -rn pattern .`.
+
+### 3. Preserve the Original Shell Shape
+
+The evaluator rewrites only the command portion. Wrapper commands and shell context stay intact so the suggestion still matches the original execution environment.
+
+### 4. Block on Uncertainty
+
+If `rg` flag semantics are unclear or a `pip` command could mean two different things, the tool does not invent certainty. Blocking is better than a subtly wrong rewrite.
+
+### 5. Guidance and Enforcement Are Separate
+
+`AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` can teach preferred tool choices before a command runs. The binary enforces those choices when a shell command is actually about to execute.
+
+## Performance
+
+`force_tool_preferences` is intended to stay enabled in the hook path, so there are two numbers that matter:
+
+1. The evaluator cost inside an already-running process
+2. The actual wall time of invoking the hook as a subprocess
+
+### Evaluator Cost
+
+Sample measurements from this repo on one machine with a release build of `enforce-tool-preferences-command`:
+
+| Case | Example input | Average per evaluation |
+|---|---|---:|
+| Allowed `rg` command | `rg TODO .` | `0.0831 us` |
+| Allowed `uv` command | `uv run pytest` | `0.1223 us` |
+| Blocked grep-family command | `grep -rn TODO .` | `0.4861 us` |
+| Blocked python-family command | `python -m pytest` | `0.4750 us` |
+
+Reproduce locally:
+
+```sh
+cargo build --release
+
+./target/release/enforce-tool-preferences-command \
+  --benchmark-command 'rg TODO .' \
+  --iterations 5000000 \
+  --rules rg,uv
+
+./target/release/enforce-tool-preferences-command \
+  --benchmark-command 'python -m pytest' \
+  --iterations 5000000 \
+  --rules rg,uv
+```
+
+### Practical Hook Wall Time
+
+Warm-cache sample measurements from this repo on one machine, estimated by batching 200 invocations and dividing total wall time back down to a per-hook figure:
+
+| Path | Example input | Approximate wall time per hook |
+|---|---|---:|
+| Direct CLI allow | `--command 'rg TODO .'` | `6.533 ms` |
+| Direct CLI block | `--command 'grep -rn TODO .'` | `6.642 ms` |
+| Stdin command block | `--stdin-command` with `grep -rn TODO .` | `7.044 ms` |
+| Codex hook JSON block | `--codex-hook-json` with `python -m pytest` | `7.013 ms` |
+
+The overall pattern matches the split repos: evaluator work is effectively free, while subprocess startup, CLI parsing, stdin handling, and JSON handling dominate the real hook cost.
+
+## Comparison
+
+| Approach | One hook process | Exact rewrites | Honest ambiguity handling | Selective rule install |
+|---|---|---|---|---|
+| `force_tool_preferences` | Yes | Yes | Yes | Yes |
+| Separate hook repos (`force_rg` + `force_uv`) | No | Yes | Yes | Yes, but with extra processes |
+| Repo policy files only (`AGENTS.md`, prompts, docs) | No | No | No | N/A |
+| Shell aliases or wrapper scripts | Partially | No | No | Partially |
+| Manual review after the fact | No | Maybe | Maybe | N/A |
+
+When to use `force_tool_preferences`:
+
+- You want hard enforcement at the shell boundary instead of relying on prompt compliance.
+- You want one install path and one hook command for both current rule families.
+- You want to enable only `rg`, only `uv`, or both, without maintaining separate repos.
+
+When `force_tool_preferences` might not be ideal:
+
+- You only want soft written guidance and do not want blocking hooks.
+- Your team does not use `rg` or `uv` as the default workflow.
+- You need policy that varies per directory, per command source, or by richer project context than the current rule selector exposes.
 
 ## Installation
 
-### Installer
+### 1. Installer script
+
+This is the default path:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh | bash
 ```
 
-Useful variants:
+What it does:
+
+1. Clones the repo to a temporary directory.
+2. Builds `enforce-tool-preferences-command` with Cargo.
+3. Installs or updates `~/.local/bin/enforce-tool-preferences-command`.
+4. Configures Claude Code automatically if `~/.claude/settings.json` already exists.
+5. Configures Gemini CLI automatically if `~/.gemini/` already exists.
+6. Ensures Codex has `codex_hooks = true` in `${CODEX_HOME:-~/.codex}/config.toml`.
+7. Updates the Claude, Gemini, and Codex hook commands with the selected `--rules` value.
+
+Useful installer variants:
 
 ```sh
+# Print planned actions without cloning, building, or writing files.
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
   | bash -s -- --dry-run
 
+# Print SHA-256 hashes for the built and installed binary.
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
   | bash -s -- --check-binary-hash
 
+# Force overwrite even if the installed hash already matches.
+curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
+  | bash -s -- --overwrite-binary
+
+# Install only grep-family -> rg enforcement.
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
   | bash -s -- --only-rg
 
+# Install only python/pip-family -> uv enforcement.
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
   | bash -s -- --only-uv
 
+# Explicit rule selection.
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
   | bash -s -- --rules rg,uv
 ```
 
-Prerequisites depend on the selected rules:
+Prerequisites:
 
-- always: `cargo`
-- `rg` rules selected: `rg`
-- `uv` rules selected: `uv`
+| Selected rules | Required tools |
+|---|---|
+| `rg` | `cargo`, `rg` |
+| `uv` | `cargo`, `uv` |
+| `rg,uv` | `cargo`, `rg`, `uv` |
 
-### Build from source
+### 2. Build from source
 
 ```sh
 git clone https://github.com/maksymsherman/force_tool_preferences.git
@@ -192,31 +331,439 @@ mkdir -p ~/.codex
   --rules rg,uv
 ```
 
-For Codex, also ensure `codex_hooks = true` under `[features]` in `~/.codex/config.toml`.
+For Codex, also ensure `~/.codex/config.toml` contains:
 
-## Design
+```toml
+[features]
+codex_hooks = true
+```
 
-- One binary owns the hook boundary and evaluates all current rule families.
-- The command evaluator is centralized around an internal rule dispatcher, so future rules like `npm` / `npx` / `node` -> `bun` can be added without adding more hook processes.
-- Hook configuration is rule-aware, so reinstalling with `--only-rg` or `--only-uv` updates the existing hook instead of appending duplicates.
-- The grep-family translation remains conservative: safe rewrites are suggested, unsafe flags are blocked.
-- The Python-family translation preserves wrapper commands and distinguishes likely project dependency updates from pip-style environment mutation.
+## Quick Start
 
-## Comparison
+### 1. Inspect the installer
 
-| Approach | One hook process | Exact rewrites | Honest ambiguity handling | Selective rule install |
-|---|---|---|---|---|
-| `force_tool_preferences` | Yes | Yes | Yes | Yes |
-| Separate hook repos | No | Yes | Yes | Yes, but with extra processes |
-| `AGENTS.md` only | No | No | No | N/A |
-| Shell aliases | Partially | No | No | Partially |
+```sh
+curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
+  | bash -s -- --dry-run
+```
+
+### 2. Install the rule families you want
+
+```sh
+# Default: both families
+curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
+  | bash
+
+# Only rg
+curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
+  | bash -s -- --only-rg
+
+# Only uv
+curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
+  | bash -s -- --only-uv
+```
+
+### 3. Restart any running agent sessions
+
+Existing Claude Code, Gemini CLI, and Codex sessions usually keep old hook state until they restart.
+
+### 4. Validate the behavior directly
+
+```sh
+enforce-tool-preferences-command --command 'grep -rn TODO .'
+enforce-tool-preferences-command --command 'python -m pytest'
+enforce-tool-preferences-command --command 'pip install requests'
+```
+
+## Command Reference
+
+### `--command '<shell command>'`
+
+Evaluate a shell command passed directly on the command line.
+
+```sh
+enforce-tool-preferences-command --command 'grep -rn TODO .'
+enforce-tool-preferences-command --command 'python -m pytest'
+```
+
+### `--stdin-command`
+
+Read the shell command from stdin instead of an argument.
+
+```sh
+printf '%s' 'grep -rn TODO .' \
+  | enforce-tool-preferences-command --stdin-command
+```
+
+### `--claude-hook-json`
+
+Read hook JSON from stdin, extract `tool_input.command`, and emit Claude-style JSON block output when the command is rejected.
+
+```sh
+printf '%s' '{"tool_input":{"command":"grep -rn TODO ."}}' \
+  | enforce-tool-preferences-command --claude-hook-json --rules rg,uv
+```
+
+### `--codex-hook-json`
+
+Read hook JSON from stdin, extract `tool_input.command`, and emit Codex-style JSON block output when the command is rejected.
+
+```sh
+printf '%s' '{"tool_input":{"command":"python -m pytest"}}' \
+  | enforce-tool-preferences-command --codex-hook-json --rules rg,uv
+```
+
+### `--gemini-hook-json`
+
+Read hook JSON from stdin and evaluate `tool_input.command` for Gemini hook integration.
+
+```sh
+printf '%s' '{"tool_input":{"command":"pip install requests"}}' \
+  | enforce-tool-preferences-command --gemini-hook-json --rules rg,uv
+```
+
+### `--claude-json`
+
+When used with `--command` or `--stdin-command`, emit JSON block output instead of plain text.
+
+```sh
+enforce-tool-preferences-command \
+  --command 'grep -rn TODO .' \
+  --claude-json \
+  --rules rg,uv
+```
+
+### `--rules rg|uv|rg,uv`
+
+Restrict which rule families are active for this invocation or configured hook.
+
+```sh
+enforce-tool-preferences-command --command 'grep -rn TODO .' --rules rg
+enforce-tool-preferences-command --command 'python -m pytest' --rules uv
+enforce-tool-preferences-command --command 'pip install requests' --rules rg,uv
+```
+
+### `--benchmark-command '<shell command>'`
+
+Benchmark the evaluator on the same input repeatedly.
+
+```sh
+enforce-tool-preferences-command \
+  --benchmark-command 'python -m pytest' \
+  --iterations 1000000 \
+  --rules rg,uv
+```
+
+### `--iterations <n>`
+
+Set the loop count for benchmark mode. The value must be greater than `0`.
+
+### `--configure-claude-hook <settings-path> <binary-name>`
+
+Update Claude Code hook settings in place.
+
+```sh
+enforce-tool-preferences-command \
+  --configure-claude-hook ~/.claude/settings.json ~/.local/bin/enforce-tool-preferences-command \
+  --rules rg,uv
+```
+
+### `--configure-gemini-hook <settings-path> <binary-name>`
+
+Update Gemini CLI hook settings in place.
+
+```sh
+enforce-tool-preferences-command \
+  --configure-gemini-hook ~/.gemini/settings.json ~/.local/bin/enforce-tool-preferences-command \
+  --rules rg,uv
+```
+
+### `--configure-codex-hook <hooks-path> <binary-name>`
+
+Update Codex hook settings in place.
+
+```sh
+enforce-tool-preferences-command \
+  --configure-codex-hook ~/.codex/hooks.json ~/.local/bin/enforce-tool-preferences-command \
+  --rules rg,uv
+```
+
+### `--help`
+
+Print usage text.
+
+Exit behavior:
+
+| Mode | Allowed command | Blocked command | Invalid usage |
+|---|---|---|---|
+| Direct CLI (`--command`, `--stdin-command`) | `0` | `2` | `1` |
+| Claude/Codex hook JSON | `0` | `0` with block JSON | `1` |
+| Gemini hook JSON | `0` | `2` | `1` |
+
+## Configuration
+
+### Claude Code
+
+Claude uses a `PreToolUse` hook with the `Bash` matcher.
+
+`~/.claude/settings.json`
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.local/bin/enforce-tool-preferences-command --claude-hook-json --rules rg,uv"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Automatic configuration:
+
+```sh
+enforce-tool-preferences-command \
+  --configure-claude-hook ~/.claude/settings.json ~/.local/bin/enforce-tool-preferences-command \
+  --rules rg,uv
+```
+
+Installer note: automatic Claude setup only runs when `~/.claude/settings.json` already exists.
+
+### Gemini CLI
+
+Gemini uses a `BeforeTool` hook with the `run_shell_command` matcher.
+
+`~/.gemini/settings.json`
+
+```json
+{
+  "hooks": {
+    "BeforeTool": [
+      {
+        "matcher": "run_shell_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.local/bin/enforce-tool-preferences-command --gemini-hook-json --rules rg,uv"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Automatic configuration:
+
+```sh
+mkdir -p ~/.gemini
+[ -f ~/.gemini/settings.json ] || printf '{}\n' > ~/.gemini/settings.json
+enforce-tool-preferences-command \
+  --configure-gemini-hook ~/.gemini/settings.json ~/.local/bin/enforce-tool-preferences-command \
+  --rules rg,uv
+```
+
+Installer note: automatic Gemini setup runs only when `~/.gemini/` already exists.
+
+### Codex
+
+Codex uses a `PreToolUse` hook with the `Bash` matcher.
+
+`~/.codex/config.toml`
+
+```toml
+[features]
+codex_hooks = true
+```
+
+`~/.codex/hooks.json`
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.local/bin/enforce-tool-preferences-command --codex-hook-json --rules rg,uv"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Automatic configuration:
+
+```sh
+mkdir -p ~/.codex
+[ -f ~/.codex/hooks.json ] || printf '{}\n' > ~/.codex/hooks.json
+enforce-tool-preferences-command \
+  --configure-codex-hook ~/.codex/hooks.json ~/.local/bin/enforce-tool-preferences-command \
+  --rules rg,uv
+```
+
+The installer also ensures `${CODEX_HOME:-~/.codex}/config.toml` contains `codex_hooks = true`.
+
+### Project-local guidance files
+
+This repo also ships:
+
+- `AGENTS.md`
+- `CLAUDE.md`
+- `GEMINI.md`
+
+Those files are optional prompt-level guidance. The binary and hooks are the actual shell boundary enforcement layer.
+
+## Architecture
+
+```text
+                               install.sh
+                                   |
+                 +-----------------+-----------------+
+                 |                 |                 |
+                 v                 v                 v
+       build release binary   update agent hooks   enable Codex feature flag
+                 |                 |                 |
+                 v                 v                 v
+ ~/.local/bin/enforce-tool-preferences-command   ~/.claude / ~/.gemini / ~/.codex
+
+
+ Agent shell command or hook payload
+                 |
+                 v
+  enforce-tool-preferences-command
+                 |
+       tokenize + preserve wrappers
+                 |
+                 v
+          rule-family dispatcher
+            /                 \
+           v                   v
+    grep-family -> rg    python-family -> uv
+           |                   |
+           +--------+  +-------+
+                    |  |
+                    v  v
+         allow command or block with
+         exact rewrite / alternatives /
+         manual-translation guidance
+```
+
+Data flow summary:
+
+1. The agent invokes a shell command or sends a hook payload.
+2. `enforce-tool-preferences-command` tokenizes the command while preserving wrapper context.
+3. The rule dispatcher evaluates only the enabled families from `--rules`.
+4. Safe rewrites are rendered directly; ambiguous cases are blocked with guidance.
+5. Allowed commands exit cleanly; hook modes emit the format their runtime expects.
+
+## Troubleshooting
+
+### `cargo not found`
+
+The installer builds from source. Install Rust first:
+
+```sh
+curl https://sh.rustup.rs -sSf | sh
+```
+
+### `rg not found`
+
+If `rg` rules are enabled, ripgrep must already be installed.
+
+Check:
+
+```sh
+rg --version
+```
+
+Then install ripgrep with your system package manager and rerun the installer.
+
+### `uv not found`
+
+If `uv` rules are enabled, `uv` must already be installed.
+
+Check:
+
+```sh
+uv --version
+```
+
+Then install `uv` and rerun the installer.
+
+### Claude Code was detected, but hooks were not configured
+
+Automatic Claude setup only runs when `~/.claude/settings.json` already exists. Create the file, run the `--configure-claude-hook` command from this README, then restart Claude Code.
+
+### The hook exists but does not fire
+
+Most often, the agent session was already running. Restart Claude Code, Gemini CLI, or Codex after installation so the updated hook state loads.
+
+### A grep-family command was blocked without a replacement
+
+That is expected for uncertain flags. Translate the flagged options manually after checking `rg --help` instead of assuming they behave the same.
+
+### `pip install` suggested `uv pip`, but I wanted `uv add`
+
+That usually means the original command was ambiguous. Use `uv add` when you want to change project metadata. Use `uv pip` when you want pip-style environment mutation.
+
+### `uv init` was blocked, but I really do want project creation
+
+This tool assumes an existing-repo workflow by default. If the user explicitly wants project creation or conversion, rerun with that intent in mind and use `uv init --no-readme --no-workspace` to reduce the risk of overwriting existing files.
 
 ## Limitations
 
-- The installer currently targets Unix-like environments and shell-hook workflows.
-- Rule selection is hook-level, not per-directory or per-command-context.
-- Future families like `node` / `npm` / `npx` -> `bun` are not implemented yet.
+- This tool evaluates shell commands, not prose instructions or file edits.
+- It does not auto-rewrite and re-run the blocked command; it blocks and explains instead.
+- Shell parsing is deliberately practical rather than a full shell AST.
+- Rule selection is hook-level via `--rules`, not per directory or per richer project context.
+- Only the current `rg` and `uv` families are implemented today.
+- Many grep flags are intentionally blocked for manual translation instead of guessed.
+- `pip install` and `pip uninstall` cannot always distinguish project metadata changes from environment mutation.
+- The binary evaluates the command string it receives. If a runtime only passes `bash script.sh`, it does not inspect the script body.
+- The documented install path is a Bash script that builds from source. There are no package-manager or prebuilt-binary releases documented in this repo today.
 
-## Provenance
+## FAQ
 
-This repo was combined from the separate `force_rg` and `force_uv` projects. Their histories are preserved here on the `import/force-rg` and `import/force-uv` branches so the combined implementation on `main` can stay clean.
+### Does `force_tool_preferences` rewrite the command automatically?
+
+No. It blocks and prints the exact rewrite or likely alternatives. That keeps the change visible and avoids silently altering shell behavior.
+
+### Can I enable only one rule family?
+
+Yes. Use `--only-rg`, `--only-uv`, or explicit `--rules rg`, `--rules uv`, or `--rules rg,uv`.
+
+### Why does `pip install requests` return two answers?
+
+Because the command is ambiguous. It could mean "add this dependency to the project" or "mutate this environment right now." The tool shows both likely `uv` paths instead of forcing the wrong interpretation.
+
+### Does it catch wrappers, full paths, and versioned binaries?
+
+Yes. The evaluator understands wrappers such as `sudo`, `env`, `command`, `time`, `nohup`, and `builtin`, and it normalizes paths and names like `/usr/bin/grep`, `python3.11`, and `pip3.12`.
+
+### Will it allow `rg`, `uv`, and `uvx`?
+
+`rg` and `uvx` pass through unchanged. `uv` generally passes through too, except for `uv init`, which is blocked in the default existing-project workflow.
+
+### Do I still need `AGENTS.md` if hooks are enabled?
+
+Not for shell enforcement. Keep the policy files only if you also want prompt-level written guidance before a shell command is attempted.
+
+### What happened to `force_rg` and `force_uv`?
+
+Their behavior and history were folded into this combined repo. The import history is preserved on the `import/force-rg` and `import/force-uv` branches.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
