@@ -1,7 +1,10 @@
 use std::env;
+use std::fs;
 use std::io::{self, Read};
 use std::process;
 use std::time::Instant;
+
+use serde_json::{json, Map, Value};
 
 const PYTHON_MESSAGE: &str = "Use uv instead of bare Python or pip commands in this project. Replace the blocked command with 'uv run ...', 'uv add ...', 'uv add --dev ...', 'uv remove ...', or 'uv run --with ...' as appropriate.";
 const UV_INIT_MESSAGE: &str = "Do not run 'uv init' in an existing project unless the user explicitly asks for project creation or conversion. Inspect the repo first and prefer 'uv run', 'uv add', 'uv sync', or 'uv run --with'. If project initialization is truly needed, use 'uv init --no-readme --no-workspace' to avoid overwriting existing files and git history.";
@@ -72,15 +75,18 @@ fn run() -> Result<i32, String> {
     let config = Config::parse(env::args().skip(1))?;
 
     match config.mode {
-        Mode::Evaluate { input, claude_json } => {
+        Mode::Evaluate {
+            input,
+            json_block_output,
+        } => {
             let raw = match input {
                 InputMode::Command(text) => text,
                 InputMode::StdinCommand => read_stdin()?,
-                InputMode::ClaudeHookJson => extract_claude_command(&read_stdin()?)?,
+                InputMode::HookJson => extract_tool_input_command(&read_stdin()?)?,
             };
 
             match evaluate_command(raw.trim()) {
-                Some(decision) if claude_json => {
+                Some(decision) if json_block_output => {
                     let message = decision.render_message();
                     println!(
                         "{{\"decision\":\"block\",\"reason\":\"{}\"}}",
@@ -94,6 +100,27 @@ fn run() -> Result<i32, String> {
                 }
                 None => Ok(0),
             }
+        }
+        Mode::ConfigureClaudeHook {
+            settings_path,
+            binary_name,
+        } => {
+            configure_claude_hook(&settings_path, &binary_name)?;
+            Ok(0)
+        }
+        Mode::ConfigureGeminiHook {
+            settings_path,
+            binary_name,
+        } => {
+            configure_gemini_hook(&settings_path, &binary_name)?;
+            Ok(0)
+        }
+        Mode::ConfigureCodexHook {
+            settings_path,
+            binary_name,
+        } => {
+            configure_codex_hook(&settings_path, &binary_name)?;
+            Ok(0)
         }
         Mode::Benchmark {
             command,
@@ -134,15 +161,30 @@ struct Config {
 
 #[derive(Debug)]
 enum Mode {
-    Evaluate { input: InputMode, claude_json: bool },
+    Evaluate {
+        input: InputMode,
+        json_block_output: bool,
+    },
     Benchmark { command: String, iterations: u64 },
+    ConfigureClaudeHook {
+        settings_path: String,
+        binary_name: String,
+    },
+    ConfigureGeminiHook {
+        settings_path: String,
+        binary_name: String,
+    },
+    ConfigureCodexHook {
+        settings_path: String,
+        binary_name: String,
+    },
 }
 
 #[derive(Debug)]
 enum InputMode {
     Command(String),
     StdinCommand,
-    ClaudeHookJson,
+    HookJson,
 }
 
 impl Config {
@@ -151,8 +193,11 @@ impl Config {
         I: IntoIterator<Item = String>,
     {
         let mut input: Option<InputMode> = None;
-        let mut claude_json = false;
+        let mut json_block_output = false;
         let mut benchmark_command: Option<String> = None;
+        let mut configure_claude_hook: Option<(String, String)> = None;
+        let mut configure_gemini_hook: Option<(String, String)> = None;
+        let mut configure_codex_hook: Option<(String, String)> = None;
         let mut iterations = 100_000u64;
 
         let mut iter = args.into_iter();
@@ -168,20 +213,51 @@ impl Config {
                     input = Some(InputMode::StdinCommand);
                 }
                 "--claude-hook-json" => {
-                    input = Some(InputMode::ClaudeHookJson);
-                    claude_json = true;
+                    input = Some(InputMode::HookJson);
+                    json_block_output = true;
+                }
+                "--codex-hook-json" => {
+                    input = Some(InputMode::HookJson);
+                    json_block_output = true;
                 }
                 "--gemini-hook-json" => {
-                    input = Some(InputMode::ClaudeHookJson);
+                    input = Some(InputMode::HookJson);
                 }
                 "--claude-json" => {
-                    claude_json = true;
+                    json_block_output = true;
                 }
                 "--benchmark-command" => {
                     let value = iter
                         .next()
                         .ok_or_else(|| "missing value for --benchmark-command".to_string())?;
                     benchmark_command = Some(value);
+                }
+                "--configure-claude-hook" => {
+                    let settings_path = iter.next().ok_or_else(|| {
+                        "missing settings path for --configure-claude-hook".to_string()
+                    })?;
+                    let binary_name = iter.next().ok_or_else(|| {
+                        "missing binary name for --configure-claude-hook".to_string()
+                    })?;
+                    configure_claude_hook = Some((settings_path, binary_name));
+                }
+                "--configure-gemini-hook" => {
+                    let settings_path = iter.next().ok_or_else(|| {
+                        "missing settings path for --configure-gemini-hook".to_string()
+                    })?;
+                    let binary_name = iter.next().ok_or_else(|| {
+                        "missing binary name for --configure-gemini-hook".to_string()
+                    })?;
+                    configure_gemini_hook = Some((settings_path, binary_name));
+                }
+                "--configure-codex-hook" => {
+                    let settings_path = iter.next().ok_or_else(|| {
+                        "missing settings path for --configure-codex-hook".to_string()
+                    })?;
+                    let binary_name = iter.next().ok_or_else(|| {
+                        "missing binary name for --configure-codex-hook".to_string()
+                    })?;
+                    configure_codex_hook = Some((settings_path, binary_name));
                 }
                 "--iterations" => {
                     let value = iter
@@ -196,7 +272,7 @@ impl Config {
                     return Ok(Self {
                         mode: Mode::Evaluate {
                             input: InputMode::Command(String::new()),
-                            claude_json: false,
+                            json_block_output: false,
                         },
                     });
                 }
@@ -215,19 +291,49 @@ impl Config {
             });
         }
 
+        if let Some((settings_path, binary_name)) = configure_claude_hook {
+            return Ok(Self {
+                mode: Mode::ConfigureClaudeHook {
+                    settings_path,
+                    binary_name,
+                },
+            });
+        }
+
+        if let Some((settings_path, binary_name)) = configure_gemini_hook {
+            return Ok(Self {
+                mode: Mode::ConfigureGeminiHook {
+                    settings_path,
+                    binary_name,
+                },
+            });
+        }
+
+        if let Some((settings_path, binary_name)) = configure_codex_hook {
+            return Ok(Self {
+                mode: Mode::ConfigureCodexHook {
+                    settings_path,
+                    binary_name,
+                },
+            });
+        }
+
         let input = input.ok_or_else(|| {
-            "expected one of --command, --stdin-command, or --claude-hook-json".to_string()
+            "expected one of --command, --stdin-command, --claude-hook-json, --codex-hook-json, or --gemini-hook-json".to_string()
         })?;
 
         Ok(Self {
-            mode: Mode::Evaluate { input, claude_json },
+            mode: Mode::Evaluate {
+                input,
+                json_block_output,
+            },
         })
     }
 }
 
 fn print_usage() {
     println!(
-        "Usage:\n  enforce-uv-command --command \"python -m pytest\" [--claude-json]\n  enforce-uv-command --stdin-command [--claude-json]\n  enforce-uv-command --claude-hook-json\n  enforce-uv-command --gemini-hook-json\n  enforce-uv-command --benchmark-command \"python -m pytest\" [--iterations 1000000]"
+        "Usage:\n  enforce-uv-command --command \"python -m pytest\" [--claude-json]\n  enforce-uv-command --stdin-command [--claude-json]\n  enforce-uv-command --claude-hook-json\n  enforce-uv-command --codex-hook-json\n  enforce-uv-command --gemini-hook-json\n  enforce-uv-command --benchmark-command \"python -m pytest\" [--iterations 1000000]\n  enforce-uv-command --configure-claude-hook <settings-path> <binary-name>\n  enforce-uv-command --configure-gemini-hook <settings-path> <binary-name>\n  enforce-uv-command --configure-codex-hook <hooks-path> <binary-name>"
     );
 }
 
@@ -966,7 +1072,133 @@ fn is_shell_assignment(token: &[u8]) -> bool {
         .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
 }
 
-fn extract_claude_command(input: &str) -> Result<String, String> {
+fn configure_claude_hook(settings_path: &str, binary_name: &str) -> Result<(), String> {
+    configure_agent_hook(
+        settings_path,
+        "PreToolUse",
+        "Bash",
+        &format!("{binary_name} --claude-hook-json"),
+    )
+}
+
+fn configure_gemini_hook(settings_path: &str, binary_name: &str) -> Result<(), String> {
+    configure_agent_hook(
+        settings_path,
+        "BeforeTool",
+        "run_shell_command",
+        &format!("{binary_name} --gemini-hook-json"),
+    )
+}
+
+fn configure_codex_hook(settings_path: &str, binary_name: &str) -> Result<(), String> {
+    configure_agent_hook(
+        settings_path,
+        "PreToolUse",
+        "Bash",
+        &format!("{binary_name} --codex-hook-json"),
+    )
+}
+
+fn configure_agent_hook(
+    settings_path: &str,
+    phase: &str,
+    matcher: &str,
+    hook_command: &str,
+) -> Result<(), String> {
+    let input = fs::read_to_string(settings_path)
+        .map_err(|error| format!("failed to read {settings_path}: {error}"))?;
+    let mut settings: Value = serde_json::from_str(&input)
+        .map_err(|error| format!("failed to parse {settings_path} as JSON: {error}"))?;
+
+    update_hook_settings(&mut settings, phase, matcher, hook_command)?;
+
+    let mut serialized = serde_json::to_string_pretty(&settings)
+        .map_err(|error| format!("failed to serialize updated settings: {error}"))?;
+    serialized.push('\n');
+    fs::write(settings_path, serialized)
+        .map_err(|error| format!("failed to write {settings_path}: {error}"))?;
+    Ok(())
+}
+
+fn update_hook_settings(
+    settings: &mut Value,
+    phase: &str,
+    matcher: &str,
+    hook_command: &str,
+) -> Result<(), String> {
+    let settings_obj = ensure_object(settings, "settings root")?;
+    let hooks = settings_obj
+        .entry("hooks".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let hooks_obj = ensure_object(hooks, "`hooks`")?;
+    let phase_list = hooks_obj
+        .entry(phase.to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let entries = ensure_array(phase_list, phase)?;
+
+    let mut matched_entry_index = None;
+    for (index, entry) in entries.iter().enumerate() {
+        if entry
+            .as_object()
+            .and_then(|value| value.get("matcher"))
+            .and_then(Value::as_str)
+            == Some(matcher)
+        {
+            matched_entry_index = Some(index);
+            break;
+        }
+    }
+
+    if matched_entry_index.is_none() {
+        entries.push(json!({
+            "matcher": matcher,
+            "hooks": [],
+        }));
+        matched_entry_index = Some(entries.len() - 1);
+    }
+
+    let entry = entries
+        .get_mut(matched_entry_index.unwrap())
+        .ok_or_else(|| "failed to select hook entry".to_string())?;
+    let entry_obj = ensure_object(entry, "hook entry")?;
+    let hook_list = entry_obj
+        .entry("hooks".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    let hooks_array = ensure_array(hook_list, "hook list")?;
+
+    if hooks_array.iter().any(|hook| {
+        hook.as_object()
+            .and_then(|value| value.get("command"))
+            .and_then(Value::as_str)
+            .is_some_and(|command| command.contains(hook_command))
+    }) {
+        return Ok(());
+    }
+
+    hooks_array.push(json!({
+        "type": "command",
+        "command": hook_command,
+    }));
+
+    Ok(())
+}
+
+fn ensure_object<'a>(
+    value: &'a mut Value,
+    context: &str,
+) -> Result<&'a mut Map<String, Value>, String> {
+    value
+        .as_object_mut()
+        .ok_or_else(|| format!("{context} must be a JSON object"))
+}
+
+fn ensure_array<'a>(value: &'a mut Value, context: &str) -> Result<&'a mut Vec<Value>, String> {
+    value
+        .as_array_mut()
+        .ok_or_else(|| format!("{context} must be a JSON array"))
+}
+
+fn extract_tool_input_command(input: &str) -> Result<String, String> {
     let mut parser = JsonParser::new(input);
     let command = parser
         .parse_root_for_tool_input_command()?
@@ -1290,6 +1522,7 @@ impl<'a> JsonParser<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn decision_message(command: &str) -> String {
         evaluate_command(command).unwrap().render_message()
@@ -1371,11 +1604,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_claude_hook_json() {
+    fn parses_tool_hook_json() {
         let input =
             r#"{"tool_name":"Bash","tool_input":{"command":"python -m pytest","cwd":"/tmp"}}"#;
         assert_eq!(
-            extract_claude_command(input).unwrap(),
+            extract_tool_input_command(input).unwrap(),
             "python -m pytest".to_string()
         );
     }
@@ -1384,8 +1617,112 @@ mod tests {
     fn parses_escaped_json_command() {
         let input = r#"{"tool_input":{"command":"python -c \"print(\\\"ok\\\")\"","cwd":"/tmp"}}"#;
         assert_eq!(
-            extract_claude_command(input).unwrap(),
+            extract_tool_input_command(input).unwrap(),
             "python -c \"print(\\\"ok\\\")\"".to_string()
+        );
+    }
+
+    #[test]
+    fn parses_codex_hook_flag() {
+        let config = Config::parse(["--codex-hook-json".to_string()]).unwrap();
+
+        match config.mode {
+            Mode::Evaluate {
+                input: InputMode::HookJson,
+                json_block_output: true,
+            } => {}
+            mode => panic!("unexpected mode: {mode:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_codex_hook_configuration_flag() {
+        let config = Config::parse([
+            "--configure-codex-hook".to_string(),
+            "/tmp/hooks.json".to_string(),
+            "/tmp/enforce-uv-command".to_string(),
+        ])
+        .unwrap();
+
+        match config.mode {
+            Mode::ConfigureCodexHook {
+                settings_path,
+                binary_name,
+            } => {
+                assert_eq!(settings_path, "/tmp/hooks.json");
+                assert_eq!(binary_name, "/tmp/enforce-uv-command");
+            }
+            mode => panic!("unexpected mode: {mode:?}"),
+        }
+    }
+
+    #[test]
+    fn updates_hook_settings_without_duplicates() {
+        let mut settings = json!({});
+
+        update_hook_settings(
+            &mut settings,
+            "PreToolUse",
+            "Bash",
+            "enforce-uv-command --claude-hook-json",
+        )
+        .unwrap();
+        update_hook_settings(
+            &mut settings,
+            "PreToolUse",
+            "Bash",
+            "enforce-uv-command --claude-hook-json",
+        )
+        .unwrap();
+
+        assert_eq!(
+            settings,
+            json!({
+              "hooks": {
+                "PreToolUse": [{
+                  "matcher": "Bash",
+                  "hooks": [{
+                    "type": "command",
+                    "command": "enforce-uv-command --claude-hook-json"
+                  }]
+                }]
+              }
+            })
+        );
+    }
+
+    #[test]
+    fn updates_codex_hook_settings_without_duplicates() {
+        let mut settings = json!({});
+
+        update_hook_settings(
+            &mut settings,
+            "PreToolUse",
+            "Bash",
+            "/tmp/enforce-uv-command --codex-hook-json",
+        )
+        .unwrap();
+        update_hook_settings(
+            &mut settings,
+            "PreToolUse",
+            "Bash",
+            "/tmp/enforce-uv-command --codex-hook-json",
+        )
+        .unwrap();
+
+        assert_eq!(
+            settings,
+            json!({
+              "hooks": {
+                "PreToolUse": [{
+                  "matcher": "Bash",
+                  "hooks": [{
+                    "type": "command",
+                    "command": "/tmp/enforce-uv-command --codex-hook-json"
+                  }]
+                }]
+              }
+            })
         );
     }
 }

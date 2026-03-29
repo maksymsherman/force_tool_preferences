@@ -3,6 +3,9 @@ name = "force-uv"
 version = "0.1.0"
 edition = "2021"
 
+[dependencies]
+serde_json = "1"
+
 [[bin]]
 name = "enforce-uv-command"
 path = "src/main.rs"

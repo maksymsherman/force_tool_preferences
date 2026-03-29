@@ -14,11 +14,16 @@ python -m pytest
 continue
 ```
 
+<div align="center">
+
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust 2021](https://img.shields.io/badge/rust-2021-black?logo=rust)](https://www.rust-lang.org/)
 [![uv First](https://img.shields.io/badge/python-workflows-uv%20first-4B8BBE)](https://docs.astral.sh/uv/)
+[![Agents](https://img.shields.io/badge/agents-Claude%20Code%20%7C%20Gemini%20%7C%20Codex-0A66C2)](#installation)
 
-Hook-based enforcement for `uv`-first Python workflows in agentic coding tools. `force_uv` blocks bare `python` and `pip` shell commands, suggests the least invasive `uv` rewrite, and installs cleanly into Claude Code, Gemini CLI, and Codex workflows.
+Shell-hook enforcement for `uv`-first Python workflows across Codex, Claude Code, and Gemini CLI.
+
+</div>
 
 Quick install:
 
@@ -45,9 +50,9 @@ It also blocks `uv init` in existing-project workflows and points the agent towa
 | Exact rewrites when confidence is high | `python -m pytest` becomes `uv run python -m pytest` |
 | Conservative ambiguity handling | `pip install requests` returns both `uv add requests` and `uv pip install requests` |
 | Wrapper-aware parsing | Preserves `sudo`, `env`, `command`, `nohup`, `time`, and `builtin` prefixes |
-| Hook-friendly output modes | Supports direct command mode, stdin mode, Claude JSON hook mode, and Gemini hook mode |
+| Hook-friendly output modes | Supports direct command mode, stdin mode, and Codex/Claude/Gemini hook JSON modes |
 | Safer repo initialization policy | Blocks `uv init` unless the user explicitly wants project creation/conversion |
-| Low-friction deployment | Installer builds the binary, configures supported hooks, and installs the Codex skill |
+| Low-friction deployment | Installer builds the binary, configures Claude/Gemini hooks, and enables Codex hooks |
 
 ## Quick Example
 
@@ -67,9 +72,9 @@ enforce-uv-command --command 'sudo -u root python script.py'
 # Safe uv usage passes through
 enforce-uv-command --command 'uv run pytest'
 
-# Hook-style JSON input for Claude Code
+# Codex/Claude-style hook JSON input
 printf '%s' '{"tool_input":{"command":"python -m pytest"}}' \
-  | enforce-uv-command --claude-hook-json
+  | enforce-uv-command --codex-hook-json
 ```
 
 Expected behavior:
@@ -141,18 +146,30 @@ Warm-cache sample measurements from one machine, estimated by batching 200 invoc
 | Direct CLI allow | `--command 'uv run pytest'` | `3.4 ms` |
 | Direct CLI block | `--command 'python -m pytest'` | `3.2 ms` |
 | Stdin command block | `--stdin-command` with `python -m pytest` | `4.6 ms` |
-| Claude hook JSON block | `--claude-hook-json` with `tool_input.command` | `4.4 ms` |
+| Codex/Claude hook JSON block | `--codex-hook-json` with `tool_input.command` | `4.4 ms` |
 
 That practical number is what matters in agent use. The gap between the microbenchmark and the real hook cost comes from shell startup, process startup, CLI parsing, stdin reads, JSON parsing, output formatting, and pipe plumbing. Results will vary across machines, but the overall shape is the same: the evaluator itself is effectively free, while the subprocess hook architecture costs low single-digit milliseconds per invocation.
 
 ## Comparison
 
-| Approach | Actually blocks bad shell commands | Suggests specific rewrites | Works across multiple agent tools | Keeps ambiguity explicit |
+| Approach | Blocks bare `python`/`pip` | Suggests concrete rewrites | Works across Codex/Claude/Gemini | Handles ambiguity honestly |
 |---|---|---|---|---|
-| No policy | No | No | No | No |
+| `force_uv` hook enforcement | Yes | Yes | Yes | Yes |
 | Repo instructions only (`AGENTS.md`, prompts, docs) | No | Sometimes, manually | Depends on the agent | Usually not |
-| Codex skill only | Only inside Codex skill-triggered contexts | Yes | No | Yes |
-| `force_uv` hook enforcement | Yes | Yes | Yes, for supported integrations | Yes |
+| Shell aliases or wrapper scripts | Partially | No | No | No |
+| Manual review after the fact | No | Maybe | No | Maybe |
+
+When to use `force_uv`:
+
+- You want hard enforcement at the shell boundary instead of relying on prompt compliance.
+- You want `python` and `pip` commands blocked with exact or confidence-graded `uv` rewrites.
+- You need one policy that behaves consistently across Codex, Claude Code, and Gemini CLI.
+
+When `force_uv` might not be ideal:
+
+- You only want soft guidance and do not want blocking hooks.
+- Your team does not use `uv` as the default Python workflow.
+- You need Windows support for Codex hooks today.
 
 ## Installation
 
@@ -171,7 +188,7 @@ What it does:
 3. Installs or updates `~/.local/bin/enforce-uv-command`.
 4. Configures Claude Code automatically if `~/.claude/settings.json` exists.
 5. Configures Gemini CLI automatically if `~/.gemini/` exists.
-6. Copies `SKILL.md` to `${CODEX_HOME:-~/.codex}/skills/force-uv/SKILL.md`.
+6. Enables Codex hooks in `${CODEX_HOME:-~/.codex}/config.toml` and `${CODEX_HOME:-~/.codex}/hooks.json`.
 
 Prerequisites:
 
@@ -200,25 +217,56 @@ curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_uv/main/install
 git clone https://github.com/maksymsherman/force_uv.git
 cd force_uv
 cargo build --release
+mkdir -p ~/.local/bin
 cp target/release/enforce-uv-command ~/.local/bin/
 chmod +x ~/.local/bin/enforce-uv-command
 ```
 
-### 3. Codex-only installation
-
-If you only want the Codex skill and do not need shell hooks:
+### 3. Build and configure manually
 
 ```sh
-git clone https://github.com/maksymsherman/force_uv.git ~/.codex/skills/force-uv
+git clone https://github.com/maksymsherman/force_uv.git
+cd force_uv
+cargo build --release
+mkdir -p ~/.local/bin
+cp target/release/enforce-uv-command ~/.local/bin/
+chmod +x ~/.local/bin/enforce-uv-command
 ```
 
-If you want a project-local fallback instead of a global skill:
+Then configure hooks yourself:
+
+```sh
+mkdir -p ~/.gemini
+[ -f ~/.gemini/settings.json ] || printf '{}\n' > ~/.gemini/settings.json
+enforce-uv-command --configure-gemini-hook ~/.gemini/settings.json ~/.local/bin/enforce-uv-command
+mkdir -p ~/.codex
+[ -f ~/.codex/hooks.json ] || printf '{}\n' > ~/.codex/hooks.json
+enforce-uv-command --configure-codex-hook ~/.codex/hooks.json ~/.local/bin/enforce-uv-command
+```
+
+For Claude Code, either create `~/.claude/settings.json` first or add the hook snippet manually from the configuration section below. For Codex, also set `codex_hooks = true` under `[features]` in `~/.codex/config.toml`.
+
+### 4. Policy files only
+
+If you do not want the binary yet, you can still copy the repo-local guidance file into another project:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_uv/main/AGENTS.md -o AGENTS.md
 ```
 
 ## Quick Start
+
+1. Install the tool with the one-line installer or build it from source.
+2. Restart any running Codex, Claude Code, or Gemini CLI sessions so the new hooks load.
+3. Verify that safe `uv` commands pass and bare Python commands get blocked:
+
+```sh
+enforce-uv-command --command 'uv run pytest'
+enforce-uv-command --command 'python -m pytest'
+enforce-uv-command --command 'pip install requests'
+```
+
+4. Add `AGENTS.md` to repos where you also want prompt-level written guidance before a shell command is attempted.
 
 ### Claude Code
 
@@ -266,11 +314,52 @@ Run the installer, then restart Gemini CLI sessions. Manual configuration:
 
 ### Codex
 
-The installer copies the skill to `~/.codex/skills/force-uv/SKILL.md`. After that, start a new Codex session so the skill is available automatically for Python and pip related tasks.
+Codex uses a `PreToolUse` hook with the `Bash` matcher. The installer enables the `codex_hooks` feature flag in `~/.codex/config.toml`, adds the hook entry to `~/.codex/hooks.json`, and leaves `AGENTS.md` as an optional repo-local guidance file.
 
-If you want the project-local policy instead, put this repo's `AGENTS.md` in the project root.
+Codex hooks are experimental, and the current Codex docs note that Windows support is temporarily disabled.
+
+Important caveat: Codex currently applies this policy at the `PreToolUse` Bash interception point. That means `force_uv` sees and can block direct Bash commands such as `python -m pytest`, but it does not inspect the contents of a script that Codex writes to disk and later runs with `bash script.sh`. Treat this as a workflow guardrail, not a sandbox or hard security boundary.
+
+If you configure Codex manually, use this shape:
+
+```toml
+[features]
+codex_hooks = true
+```
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.local/bin/enforce-uv-command --codex-hook-json"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Then restart Codex so the new hook state loads.
 
 ## Command Reference
+
+| Command | Purpose | Example |
+|---|---|---|
+| `--command <text>` | Evaluate one shell command directly | `enforce-uv-command --command 'python -m pytest'` |
+| `--stdin-command` | Read the command from stdin | `printf '%s' 'python -m pytest' \| enforce-uv-command --stdin-command` |
+| `--claude-hook-json` | Read Claude hook JSON and emit JSON block output | `printf '%s' '{"tool_input":{"command":"python -m pytest"}}' \| enforce-uv-command --claude-hook-json` |
+| `--codex-hook-json` | Read Codex hook JSON and emit JSON block output | `printf '%s' '{"tool_input":{"command":"python -m pytest"}}' \| enforce-uv-command --codex-hook-json` |
+| `--gemini-hook-json` | Read Gemini hook JSON and emit plain-text blocking output | `printf '%s' '{"tool_input":{"command":"python -m pytest"}}' \| enforce-uv-command --gemini-hook-json` |
+| `--configure-claude-hook <settings> <binary>` | Add the Claude hook entry to a settings file | `enforce-uv-command --configure-claude-hook ~/.claude/settings.json ~/.local/bin/enforce-uv-command` |
+| `--configure-gemini-hook <settings> <binary>` | Add the Gemini hook entry to a settings file | `enforce-uv-command --configure-gemini-hook ~/.gemini/settings.json ~/.local/bin/enforce-uv-command` |
+| `--configure-codex-hook <hooks> <binary>` | Add the Codex hook entry to a hooks file | `enforce-uv-command --configure-codex-hook ~/.codex/hooks.json ~/.local/bin/enforce-uv-command` |
+| `--benchmark-command <text>` | Benchmark the evaluator on one command string | `enforce-uv-command --benchmark-command 'python -m pytest'` |
 
 ### `--command '<shell command>'`
 
@@ -305,6 +394,15 @@ Blocked output looks like:
 {"decision":"block","reason":"Use uv instead of bare Python or pip commands in this project. Replace the blocked command with 'uv run ...', 'uv add ...', 'uv add --dev ...', 'uv remove ...', or 'uv run --with ...' as appropriate.\nSuggested replacement:\n  uv run python -m pytest"}
 ```
 
+### `--codex-hook-json`
+
+Read Codex hook JSON from stdin, extract `tool_input.command`, and emit the JSON block shape Codex still accepts for `PreToolUse`.
+
+```sh
+printf '%s' '{"tool_input":{"command":"python -m pytest"}}' \
+  | enforce-uv-command --codex-hook-json
+```
+
 ### `--gemini-hook-json`
 
 Reads the same hook-style JSON shape from stdin, but prints the human-readable block message expected by Gemini CLI hook execution.
@@ -322,6 +420,18 @@ Use JSON block output with `--command` or `--stdin-command`.
 enforce-uv-command --command 'python -m pytest' --claude-json
 printf '%s' 'python -m pytest' | enforce-uv-command --stdin-command --claude-json
 ```
+
+### `--configure-claude-hook <settings-path> <binary-name>`
+
+Add the Claude Code `PreToolUse` hook entry to an existing settings file.
+
+### `--configure-gemini-hook <settings-path> <binary-name>`
+
+Add the Gemini CLI `BeforeTool` hook entry to a settings file.
+
+### `--configure-codex-hook <hooks-path> <binary-name>`
+
+Add the Codex `PreToolUse` hook entry to a `hooks.json` file.
 
 ### `--benchmark-command '<shell command>'`
 
@@ -424,6 +534,12 @@ Recommended alternatives depend on intent:
 }
 ```
 
+Automatic configuration:
+
+```sh
+enforce-uv-command --configure-claude-hook ~/.claude/settings.json ~/.local/bin/enforce-uv-command
+```
+
 ### Gemini CLI hook config
 
 ```json
@@ -444,18 +560,55 @@ Recommended alternatives depend on intent:
 }
 ```
 
-### Codex skill config
+Automatic configuration:
 
-Global skill path installed by `install.sh`:
-
-```text
-${CODEX_HOME:-~/.codex}/skills/force-uv/SKILL.md
+```sh
+mkdir -p ~/.gemini
+[ -f ~/.gemini/settings.json ] || printf '{}\n' > ~/.gemini/settings.json
+enforce-uv-command --configure-gemini-hook ~/.gemini/settings.json ~/.local/bin/enforce-uv-command
 ```
 
-Project-local fallback:
+### Codex hook config
+
+`~/.codex/config.toml`
+
+```toml
+[features]
+codex_hooks = true
+```
+
+`~/.codex/hooks.json`
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.local/bin/enforce-uv-command --codex-hook-json"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Project-local prompt guidance remains optional:
 
 ```text
 ./AGENTS.md
+```
+
+Automatic configuration:
+
+```sh
+mkdir -p ~/.codex
+[ -f ~/.codex/hooks.json ] || printf '{}\n' > ~/.codex/hooks.json
+enforce-uv-command --configure-codex-hook ~/.codex/hooks.json ~/.local/bin/enforce-uv-command
 ```
 
 ## Architecture
@@ -466,11 +619,11 @@ Project-local fallback:
         +---------------+----------------+
         |               |                |
         v               v                v
-  cargo build     hook config      Codex skill copy
+  cargo build     hook config     Codex hook config
         |               |                |
         v               v                v
- ~/.local/bin/   ~/.claude/ or      ~/.codex/skills/
- enforce-uv-command   ~/.gemini/        force-uv/
+ ~/.local/bin/   ~/.claude/ or      ~/.codex/
+ enforce-uv-command   ~/.gemini/     config.toml + hooks.json
 
 
  Agent shell request / hook payload
@@ -509,7 +662,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ### The installer ran, but the hook is not firing
 
-Most often, the agent session was already running. Restart Claude Code, Gemini CLI, or Codex after installation so the new hook or skill is loaded.
+Most often, the agent session was already running. Restart Claude Code, Gemini CLI, or Codex after installation so the new hook state is loaded.
 
 ### Claude Code was detected, but no hook was added
 
@@ -518,6 +671,10 @@ Automatic Claude setup only runs when `~/.claude/settings.json` already exists. 
 ### Gemini CLI settings look empty
 
 This is expected on first install. If `~/.gemini/` exists but `settings.json` does not, the installer creates it and then adds the `BeforeTool` hook entry.
+
+### Codex hook exists but does not fire
+
+Make sure `~/.codex/config.toml` has `[features]` with `codex_hooks = true`, and restart the running Codex session after editing `~/.codex/hooks.json`.
 
 ### The suggestion uses `uv pip`, but I wanted `uv add`
 
@@ -528,7 +685,9 @@ That usually means the original command was ambiguous. For dependency changes th
 - This tool evaluates shell commands, not prose instructions or file edits.
 - It does not auto-rewrite and re-run the command; it blocks and explains.
 - The shell parsing is deliberately narrow and practical, not a full shell AST.
-- Automatic hook setup is currently implemented for Claude Code and Gemini CLI. Codex uses the installed skill or a project-local `AGENTS.md` policy instead.
+- Automatic hook setup exists for Claude Code, Gemini CLI, and Codex.
+- Codex hooks are experimental and currently disabled on Windows.
+- In Codex, this policy currently applies to direct `Bash` tool invocations. It can block `python -m pytest`, but it does not inspect script contents that are written to disk and later executed with `bash`.
 - The installer is a Bash script and assumes a Unix-like environment with Cargo available.
 - There is no package-manager or prebuilt-binary distribution path yet; source build is the supported installation path.
 
@@ -554,6 +713,10 @@ No. The tool never edits project metadata. It only blocks commands and suggests 
 
 Known-safe `uv` subcommands such as `run`, `add`, `remove`, `sync`, `pip`, `python`, `venv`, and related commands pass through unchanged.
 
+### Does this stop Codex from writing a shell script that runs `python` later?
+
+No. In Codex, the hook currently inspects the direct `Bash` command string before execution. It can block `python -m pytest`, but if Codex writes a script file and later runs `bash script.sh`, the hook sees `bash script.sh`, not the script body. That is why this README describes Codex support as a guardrail rather than a complete enforcement boundary.
+
 ### Can I inspect what the installer would do before running it?
 
 Yes:
@@ -563,9 +726,9 @@ curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_uv/main/install
   | bash -s -- --dry-run
 ```
 
-### Is this only for Codex?
+### If Codex hooks are enabled, do I still need `AGENTS.md`?
 
-No. The repo includes support for Claude Code and Gemini CLI hook integration, and it also ships a Codex skill for the same `uv`-first policy.
+Not for shell enforcement. Keep `AGENTS.md` only if you also want prompt-level written guidance in the repo before a shell command is ever attempted.
 
 ## License
 
