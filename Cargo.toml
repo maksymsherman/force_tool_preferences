@@ -1,0 +1,18 @@
+[package]
+name = "force-tool-preferences"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde_json = "1"
+smallvec = "1"
+
+[[bin]]
+name = "enforce-tool-preferences-command"
+path = "src/main.rs"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
