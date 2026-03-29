@@ -7,6 +7,8 @@ BINARY_NAME="enforce-tool-preferences-command"
 CHECK_BINARY_HASH=0
 OVERWRITE_BINARY=0
 DRY_RUN=0
+RULES="rg,uv"
+RULE_SELECTION_EXPLICIT=0
 
 info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 ok()    { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
@@ -15,7 +17,7 @@ err()   { printf '\033[1;31m==>\033[0m %s\n' "$*" >&2; }
 
 usage() {
   cat <<'EOF'
-Usage: install.sh [--check-binary-hash] [--overwrite-binary] [--dry-run] [--help]
+Usage: install.sh [--check-binary-hash] [--overwrite-binary] [--dry-run] [--rules rg,uv|rg|uv] [--only-rg] [--only-uv] [--help]
 
 Options:
   --check-binary-hash  Print the SHA-256 hashes for the built and installed binary.
@@ -23,8 +25,62 @@ Options:
                        even when the hashes already match.
   --dry-run            Print the exact repo files, paths, and planned actions without
                        cloning, building, or writing anything.
+  --rules              Enable a comma-separated subset of rule families.
+                       Supported values: rg, uv, rg,uv.
+  --only-rg            Enable only grep-family -> rg enforcement.
+  --only-uv            Enable only python/pip-family -> uv enforcement.
   --help, -h           Show this help text.
 EOF
+}
+
+normalize_rules() {
+  local value="${1// /}"
+
+  case "$value" in
+    rg|ripgrep)
+      printf 'rg\n'
+      ;;
+    uv)
+      printf 'uv\n'
+      ;;
+    rg,uv|uv,rg|ripgrep,uv|uv,ripgrep)
+      printf 'rg,uv\n'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+set_rules() {
+  local normalized
+
+  if ! normalized="$(normalize_rules "$1")"; then
+    err "invalid rule selection: $1"
+    err "expected rg, uv, or rg,uv"
+    exit 1
+  fi
+
+  if [ "$RULE_SELECTION_EXPLICIT" -eq 1 ] && [ "$RULES" != "$normalized" ]; then
+    err "multiple conflicting rule-selection flags provided"
+    exit 1
+  fi
+
+  RULES="$normalized"
+  RULE_SELECTION_EXPLICIT=1
+}
+
+rule_enabled() {
+  local rule="$1"
+
+  case ",$RULES," in
+    *",$rule,"*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 hash_file() {
@@ -116,6 +172,8 @@ print_dry_run_plan() {
   local codex_home_dir="${CODEX_HOME:-$HOME/.codex}"
 
   info "Dry run only. No files will be written and no code will be executed."
+  echo "Selected rule families:"
+  echo "  $RULES"
   echo "Installer source:"
   echo "  $REPO/raw/main/install.sh"
   echo "Repo files this installer may execute after cloning:"
@@ -126,10 +184,10 @@ print_dry_run_plan() {
   echo "  2. (cd <tmp>/force_tool_preferences && cargo build --release --quiet)"
   echo "  3. Compare <tmp>/force_tool_preferences/target/release/$BINARY_NAME against $INSTALL_DIR/$BINARY_NAME"
   echo "  4. Install or update $INSTALL_DIR/$BINARY_NAME if needed"
-  echo "  5. If Claude Code is present, update $HOME/.claude/settings.json via $BINARY_NAME --configure-claude-hook"
-  echo "  6. If Gemini CLI is present, update $HOME/.gemini/settings.json via $BINARY_NAME --configure-gemini-hook"
+  echo "  5. If Claude Code is present, update $HOME/.claude/settings.json via $BINARY_NAME --configure-claude-hook --rules $RULES"
+  echo "  6. If Gemini CLI is present, update $HOME/.gemini/settings.json via $BINARY_NAME --configure-gemini-hook --rules $RULES"
   echo "  7. Ensure $codex_home_dir/config.toml enables codex_hooks = true"
-  echo "  8. Update $codex_home_dir/hooks.json via $BINARY_NAME --configure-codex-hook"
+  echo "  8. Update $codex_home_dir/hooks.json via $BINARY_NAME --configure-codex-hook --rules $RULES"
   echo "Inspect locally before running:"
   echo "  git clone $REPO"
   echo "  cd force_tool_preferences"
@@ -147,6 +205,21 @@ while [ "$#" -gt 0 ]; do
       ;;
     --dry-run)
       DRY_RUN=1
+      ;;
+    --rules)
+      if [ "$#" -lt 2 ]; then
+        err "missing value for --rules"
+        usage
+        exit 1
+      fi
+      set_rules "$2"
+      shift
+      ;;
+    --only-rg)
+      set_rules "rg"
+      ;;
+    --only-uv)
+      set_rules "uv"
       ;;
     --help|-h)
       usage
@@ -175,12 +248,12 @@ if ! command -v cargo &>/dev/null; then
   exit 1
 fi
 
-if ! command -v rg &>/dev/null; then
+if rule_enabled rg && ! command -v rg &>/dev/null; then
   err "rg not found. Install ripgrep first: https://github.com/BurntSushi/ripgrep#installation"
   exit 1
 fi
 
-if ! command -v uv &>/dev/null; then
+if rule_enabled uv && ! command -v uv &>/dev/null; then
   err "uv not found. Install uv first: https://docs.astral.sh/uv/"
   exit 1
 fi
@@ -229,12 +302,14 @@ else
   ok "Binary already up to date at $TARGET_BINARY"
 fi
 
+HOOK_RULE_ARGS=(--rules "$RULES")
+
 CLAUDE_SETTINGS="${HOME}/.claude/settings.json"
 if [ -d "${HOME}/.claude" ]; then
   info "Detected Claude Code"
 
   if [ -f "$CLAUDE_SETTINGS" ]; then
-    "$SOURCE_BINARY" --configure-claude-hook "$CLAUDE_SETTINGS" "$TARGET_BINARY"
+    "$SOURCE_BINARY" --configure-claude-hook "$CLAUDE_SETTINGS" "$TARGET_BINARY" "${HOOK_RULE_ARGS[@]}"
     ok "Claude Code configured"
   else
     warn "Claude Code detected but could not configure hooks automatically"
@@ -243,7 +318,7 @@ if [ -d "${HOME}/.claude" ]; then
   "hooks": {
     "PreToolUse": [{
       "matcher": "Bash",
-      "hooks": [{"type": "command", "command": "$BINARY_NAME --claude-hook-json"}]
+      "hooks": [{"type": "command", "command": "$BINARY_NAME --claude-hook-json --rules $RULES"}]
     }]
   }
 EOF
@@ -255,7 +330,7 @@ if [ -d "${HOME}/.gemini" ]; then
   info "Detected Gemini CLI"
   mkdir -p "${HOME}/.gemini"
   [ -f "$GEMINI_SETTINGS" ] || printf '{}\n' > "$GEMINI_SETTINGS"
-  "$SOURCE_BINARY" --configure-gemini-hook "$GEMINI_SETTINGS" "$TARGET_BINARY"
+  "$SOURCE_BINARY" --configure-gemini-hook "$GEMINI_SETTINGS" "$TARGET_BINARY" "${HOOK_RULE_ARGS[@]}"
   ok "Gemini CLI configured"
 fi
 
@@ -266,9 +341,9 @@ CODEX_HOOKS="$CODEX_HOME_DIR/hooks.json"
 mkdir -p "$CODEX_HOME_DIR"
 [ -f "$CODEX_HOOKS" ] || printf '{}\n' > "$CODEX_HOOKS"
 enable_codex_hooks_in_config "$CODEX_CONFIG"
-"$SOURCE_BINARY" --configure-codex-hook "$CODEX_HOOKS" "$TARGET_BINARY"
+"$SOURCE_BINARY" --configure-codex-hook "$CODEX_HOOKS" "$TARGET_BINARY" "${HOOK_RULE_ARGS[@]}"
 ok "Codex configured"
 
 echo ""
-ok "force_tool_preferences installed!"
+ok "force_tool_preferences installed for rules: $RULES"
 echo "  Restart any running agent sessions for hooks to take effect."

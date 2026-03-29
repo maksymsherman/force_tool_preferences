@@ -43,6 +43,71 @@ fn rule_spec(rule: RuleId) -> &'static RuleSpec {
     &RULE_SPECS[rule as usize]
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RuleSet(u8);
+
+impl RuleSet {
+    const RIPGREP: u8 = 1 << 0;
+    const UV: u8 = 1 << 1;
+    const ALL: u8 = Self::RIPGREP | Self::UV;
+
+    fn all() -> Self {
+        Self(Self::ALL)
+    }
+
+    #[cfg(test)]
+    fn only(rule: RuleId) -> Self {
+        Self(rule_mask(rule))
+    }
+
+    fn contains(self, rule: RuleId) -> bool {
+        self.0 & rule_mask(rule) != 0
+    }
+
+    fn parse(value: &str) -> Result<Self, String> {
+        let mut mask = 0u8;
+
+        for item in value.split(',') {
+            let name = item.trim();
+            if name.is_empty() {
+                continue;
+            }
+
+            match name {
+                "rg" | "ripgrep" => mask |= Self::RIPGREP,
+                "uv" => mask |= Self::UV,
+                _ => {
+                    return Err(format!(
+                    "unknown rule set '{name}'. Expected a comma-separated list using rg and/or uv"
+                ))
+                }
+            }
+        }
+
+        if mask == 0 {
+            return Err("at least one rule must be enabled; use rg, uv, or rg,uv".to_string());
+        }
+
+        Ok(Self(mask))
+    }
+
+    fn cli_value(self) -> &'static str {
+        match self.0 {
+            Self::RIPGREP => "rg",
+            Self::UV => "uv",
+            Self::ALL => "rg,uv",
+            _ => "rg,uv",
+        }
+    }
+}
+
+fn rule_mask(rule: RuleId) -> u8 {
+    match rule {
+        RuleId::Ripgrep => RuleSet::RIPGREP,
+        RuleId::Uv => RuleSet::UV,
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct BlockDecision {
     message: String,
@@ -75,6 +140,7 @@ fn run() -> Result<i32, String> {
         Mode::Evaluate {
             input,
             json_block_output,
+            rules,
         } => {
             let raw = match input {
                 InputMode::Command(text) => text,
@@ -82,7 +148,7 @@ fn run() -> Result<i32, String> {
                 InputMode::HookJson => extract_tool_input_command(&read_stdin()?)?,
             };
 
-            match evaluate_command(raw.trim()) {
+            match evaluate_command(raw.trim(), rules) {
                 Some(decision) if json_block_output => {
                     println!(
                         "{{\"decision\":\"block\",\"reason\":\"{}\"}}",
@@ -100,6 +166,7 @@ fn run() -> Result<i32, String> {
         Mode::Benchmark {
             command,
             iterations,
+            rules,
         } => {
             if iterations == 0 {
                 return Err("iterations must be greater than 0".to_string());
@@ -109,7 +176,7 @@ fn run() -> Result<i32, String> {
             let mut blocks = 0u64;
 
             for _ in 0..iterations {
-                if evaluate_command(&command).is_some() {
+                if evaluate_command(&command, rules).is_some() {
                     blocks += 1;
                 }
             }
@@ -129,22 +196,25 @@ fn run() -> Result<i32, String> {
         Mode::ConfigureClaudeHook {
             settings_path,
             binary_name,
+            rules,
         } => {
-            configure_claude_hook(&settings_path, &binary_name)?;
+            configure_claude_hook(&settings_path, &binary_name, rules)?;
             Ok(0)
         }
         Mode::ConfigureGeminiHook {
             settings_path,
             binary_name,
+            rules,
         } => {
-            configure_gemini_hook(&settings_path, &binary_name)?;
+            configure_gemini_hook(&settings_path, &binary_name, rules)?;
             Ok(0)
         }
         Mode::ConfigureCodexHook {
             settings_path,
             binary_name,
+            rules,
         } => {
-            configure_codex_hook(&settings_path, &binary_name)?;
+            configure_codex_hook(&settings_path, &binary_name, rules)?;
             Ok(0)
         }
     }
@@ -160,22 +230,27 @@ enum Mode {
     Evaluate {
         input: InputMode,
         json_block_output: bool,
+        rules: RuleSet,
     },
     Benchmark {
         command: String,
         iterations: u64,
+        rules: RuleSet,
     },
     ConfigureClaudeHook {
         settings_path: String,
         binary_name: String,
+        rules: RuleSet,
     },
     ConfigureGeminiHook {
         settings_path: String,
         binary_name: String,
+        rules: RuleSet,
     },
     ConfigureCodexHook {
         settings_path: String,
         binary_name: String,
+        rules: RuleSet,
     },
 }
 
@@ -198,10 +273,17 @@ impl Config {
         let mut configure_gemini_hook: Option<(String, String)> = None;
         let mut configure_codex_hook: Option<(String, String)> = None;
         let mut iterations = 100_000u64;
+        let mut rules = RuleSet::all();
 
         let mut iter = args.into_iter();
         while let Some(arg) = iter.next() {
             match arg.as_str() {
+                "--rules" => {
+                    let value = iter
+                        .next()
+                        .ok_or_else(|| "missing value for --rules".to_string())?;
+                    rules = RuleSet::parse(&value)?;
+                }
                 "--command" => {
                     let value = iter
                         .next()
@@ -272,6 +354,7 @@ impl Config {
                         mode: Mode::Evaluate {
                             input: InputMode::Command(String::new()),
                             json_block_output: false,
+                            rules,
                         },
                     });
                 }
@@ -286,6 +369,7 @@ impl Config {
                 mode: Mode::Benchmark {
                     command,
                     iterations,
+                    rules,
                 },
             });
         }
@@ -295,6 +379,7 @@ impl Config {
                 mode: Mode::ConfigureClaudeHook {
                     settings_path,
                     binary_name,
+                    rules,
                 },
             });
         }
@@ -304,6 +389,7 @@ impl Config {
                 mode: Mode::ConfigureGeminiHook {
                     settings_path,
                     binary_name,
+                    rules,
                 },
             });
         }
@@ -313,6 +399,7 @@ impl Config {
                 mode: Mode::ConfigureCodexHook {
                     settings_path,
                     binary_name,
+                    rules,
                 },
             });
         }
@@ -325,6 +412,7 @@ impl Config {
             mode: Mode::Evaluate {
                 input,
                 json_block_output,
+                rules,
             },
         })
     }
@@ -332,7 +420,7 @@ impl Config {
 
 fn print_usage() {
     println!(
-        "Usage:\n  {0} --command \"grep -rn pattern .\" [--claude-json]\n  {0} --stdin-command [--claude-json]\n  {0} --claude-hook-json\n  {0} --codex-hook-json\n  {0} --gemini-hook-json\n  {0} --benchmark-command \"grep -rn pattern .\" [--iterations 1000000]\n  {0} --configure-claude-hook <settings-path> <binary-name>\n  {0} --configure-gemini-hook <settings-path> <binary-name>\n  {0} --configure-codex-hook <hooks-path> <binary-name>",
+        "Usage:\n  {0} --command \"grep -rn pattern .\" [--claude-json] [--rules rg,uv]\n  {0} --stdin-command [--claude-json] [--rules rg,uv]\n  {0} --claude-hook-json [--rules rg,uv]\n  {0} --codex-hook-json [--rules rg,uv]\n  {0} --gemini-hook-json [--rules rg,uv]\n  {0} --benchmark-command \"grep -rn pattern .\" [--iterations 1000000] [--rules rg,uv]\n  {0} --configure-claude-hook <settings-path> <binary-name> [--rules rg,uv]\n  {0} --configure-gemini-hook <settings-path> <binary-name> [--rules rg,uv]\n  {0} --configure-codex-hook <hooks-path> <binary-name> [--rules rg,uv]",
         BINARY_NAME
     );
 }
@@ -360,9 +448,9 @@ fn escape_json(value: &str) -> String {
     escaped
 }
 
-fn evaluate_command(command: &str) -> Option<BlockDecision> {
+fn evaluate_command(command: &str, rules: RuleSet) -> Option<BlockDecision> {
     if is_simple_command(command) {
-        return evaluate_simple_command(command);
+        return evaluate_simple_command(command, rules);
     }
 
     let bytes = command.as_bytes();
@@ -431,13 +519,13 @@ fn evaluate_command(command: &str) -> Option<BlockDecision> {
             }
             b';' => {
                 flush_parsed_token(command, index, &mut token_start, &mut value, &mut tokens);
-                if let Some(decision) = evaluate_parsed_segment(&mut tokens) {
+                if let Some(decision) = evaluate_parsed_segment(&mut tokens, rules) {
                     return Some(decision);
                 }
             }
             b'|' | b'&' => {
                 flush_parsed_token(command, index, &mut token_start, &mut value, &mut tokens);
-                if let Some(decision) = evaluate_parsed_segment(&mut tokens) {
+                if let Some(decision) = evaluate_parsed_segment(&mut tokens, rules) {
                     return Some(decision);
                 }
                 if index + 1 < bytes.len() && bytes[index + 1] == byte {
@@ -472,7 +560,7 @@ fn evaluate_command(command: &str) -> Option<BlockDecision> {
         &mut value,
         &mut tokens,
     );
-    evaluate_parsed_segment(&mut tokens)
+    evaluate_parsed_segment(&mut tokens, rules)
 }
 
 fn is_simple_command(command: &str) -> bool {
@@ -484,7 +572,7 @@ fn is_simple_command(command: &str) -> bool {
     })
 }
 
-fn evaluate_simple_command(command: &str) -> Option<BlockDecision> {
+fn evaluate_simple_command(command: &str, rules: RuleSet) -> Option<BlockDecision> {
     let mut tokens = TokenBuffer::new();
 
     for raw in command.split_ascii_whitespace() {
@@ -494,7 +582,7 @@ fn evaluate_simple_command(command: &str) -> Option<BlockDecision> {
         });
     }
 
-    evaluate_segment(&tokens)
+    evaluate_segment(&tokens, rules)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -536,17 +624,17 @@ fn flush_parsed_token<'a>(
     tokens.push(ParsedToken { raw, value });
 }
 
-fn evaluate_parsed_segment(tokens: &mut TokenBuffer<'_>) -> Option<BlockDecision> {
+fn evaluate_parsed_segment(tokens: &mut TokenBuffer<'_>, rules: RuleSet) -> Option<BlockDecision> {
     if tokens.is_empty() {
         return None;
     }
 
-    let decision = evaluate_segment(tokens);
+    let decision = evaluate_segment(tokens, rules);
     tokens.clear();
     decision
 }
 
-fn evaluate_segment(tokens: &[ParsedToken<'_>]) -> Option<BlockDecision> {
+fn evaluate_segment(tokens: &[ParsedToken<'_>], rules: RuleSet) -> Option<BlockDecision> {
     let mut wrapper = None;
     let mut skip_next_value = false;
 
@@ -577,15 +665,27 @@ fn evaluate_segment(tokens: &[ParsedToken<'_>]) -> Option<BlockDecision> {
                 return None;
             }
             TokenKind::Allowed(AllowedCommand::Uv) => {
+                if !rules.contains(RuleId::Uv) {
+                    return None;
+                }
                 return evaluate_uv_command(tokens, index);
             }
             TokenKind::Blocked(BlockedCommand::Grep(kind)) => {
+                if !rules.contains(RuleId::Ripgrep) {
+                    return None;
+                }
                 return Some(build_grep_decision(tokens, index, kind));
             }
             TokenKind::Blocked(BlockedCommand::Python) => {
+                if !rules.contains(RuleId::Uv) {
+                    return None;
+                }
                 return Some(build_python_decision(tokens, index));
             }
             TokenKind::Blocked(BlockedCommand::Pip) => {
+                if !rules.contains(RuleId::Uv) {
+                    return None;
+                }
                 return Some(build_pip_decision(tokens, index));
             }
             TokenKind::Other => return None,
@@ -1265,30 +1365,48 @@ fn is_shell_assignment(token: &[u8]) -> bool {
         .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
 }
 
-fn configure_claude_hook(settings_path: &str, binary_name: &str) -> Result<(), String> {
+fn configure_claude_hook(
+    settings_path: &str,
+    binary_name: &str,
+    rules: RuleSet,
+) -> Result<(), String> {
     configure_agent_hook(
         settings_path,
         "PreToolUse",
         "Bash",
-        &format!("{binary_name} --claude-hook-json"),
+        binary_name,
+        "--claude-hook-json",
+        rules,
     )
 }
 
-fn configure_gemini_hook(settings_path: &str, binary_name: &str) -> Result<(), String> {
+fn configure_gemini_hook(
+    settings_path: &str,
+    binary_name: &str,
+    rules: RuleSet,
+) -> Result<(), String> {
     configure_agent_hook(
         settings_path,
         "BeforeTool",
         "run_shell_command",
-        &format!("{binary_name} --gemini-hook-json"),
+        binary_name,
+        "--gemini-hook-json",
+        rules,
     )
 }
 
-fn configure_codex_hook(settings_path: &str, binary_name: &str) -> Result<(), String> {
+fn configure_codex_hook(
+    settings_path: &str,
+    binary_name: &str,
+    rules: RuleSet,
+) -> Result<(), String> {
     configure_agent_hook(
         settings_path,
         "PreToolUse",
         "Bash",
-        &format!("{binary_name} --codex-hook-json"),
+        binary_name,
+        "--codex-hook-json",
+        rules,
     )
 }
 
@@ -1296,14 +1414,24 @@ fn configure_agent_hook(
     settings_path: &str,
     phase: &str,
     matcher: &str,
-    hook_command: &str,
+    binary_name: &str,
+    hook_flag: &str,
+    rules: RuleSet,
 ) -> Result<(), String> {
+    let hook_command = build_hook_command(binary_name, hook_flag, rules);
     let input = fs::read_to_string(settings_path)
         .map_err(|error| format!("failed to read {settings_path}: {error}"))?;
     let mut settings: Value = serde_json::from_str(&input)
         .map_err(|error| format!("failed to parse {settings_path} as JSON: {error}"))?;
 
-    update_hook_settings(&mut settings, phase, matcher, hook_command)?;
+    update_hook_settings(
+        &mut settings,
+        phase,
+        matcher,
+        binary_name,
+        hook_flag,
+        &hook_command,
+    )?;
 
     let mut serialized = serde_json::to_string_pretty(&settings)
         .map_err(|error| format!("failed to serialize updated settings: {error}"))?;
@@ -1313,10 +1441,16 @@ fn configure_agent_hook(
     Ok(())
 }
 
+fn build_hook_command(binary_name: &str, hook_flag: &str, rules: RuleSet) -> String {
+    format!("{binary_name} {hook_flag} --rules {}", rules.cli_value())
+}
+
 fn update_hook_settings(
     settings: &mut Value,
     phase: &str,
     matcher: &str,
+    binary_name: &str,
+    hook_flag: &str,
     hook_command: &str,
 ) -> Result<(), String> {
     let settings_obj = ensure_object(settings, "settings root")?;
@@ -1359,12 +1493,39 @@ fn update_hook_settings(
         .or_insert_with(|| Value::Array(Vec::new()));
     let hooks_array = ensure_array(hook_list, "hook list")?;
 
-    if hooks_array.iter().any(|hook| {
-        hook.as_object()
+    let mut matched_index = None;
+    let mut duplicate_indexes = Vec::new();
+
+    for (index, hook) in hooks_array.iter().enumerate() {
+        let Some(command) = hook
+            .as_object()
             .and_then(|value| value.get("command"))
             .and_then(Value::as_str)
-            .is_some_and(|command| command.contains(hook_command))
-    }) {
+        else {
+            continue;
+        };
+
+        if !hook_command_matches_existing(command, binary_name, hook_flag) {
+            continue;
+        }
+
+        if matched_index.is_none() {
+            matched_index = Some(index);
+        } else {
+            duplicate_indexes.push(index);
+        }
+    }
+
+    if let Some(index) = matched_index {
+        hooks_array[index] = json!({
+            "type": "command",
+            "command": hook_command,
+        });
+
+        for index in duplicate_indexes.into_iter().rev() {
+            hooks_array.remove(index);
+        }
+
         return Ok(());
     }
 
@@ -1374,6 +1535,16 @@ fn update_hook_settings(
     }));
 
     Ok(())
+}
+
+fn hook_command_matches_existing(command: &str, binary_name: &str, hook_flag: &str) -> bool {
+    let binary_basename = binary_name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(binary_name);
+
+    command.contains(hook_flag)
+        && (command.contains(binary_name) || command.contains(binary_basename))
 }
 
 fn ensure_object<'a>(
@@ -1719,7 +1890,11 @@ mod tests {
     use serde_json::json;
 
     fn decision_message(command: &str) -> String {
-        evaluate_command(command).unwrap().message
+        decision_message_with_rules(command, RuleSet::all())
+    }
+
+    fn decision_message_with_rules(command: &str, rules: RuleSet) -> String {
+        evaluate_command(command, rules).unwrap().message
     }
 
     #[test]
@@ -1799,11 +1974,14 @@ mod tests {
 
     #[test]
     fn allows_uv_and_rg_usage() {
-        assert_eq!(evaluate_command("uv run pytest"), None);
-        assert_eq!(evaluate_command("uv --directory repo run pytest"), None);
-        assert_eq!(evaluate_command("uvx ruff check ."), None);
-        assert_eq!(evaluate_command("rg pattern ."), None);
-        assert_eq!(evaluate_command("ripgrep pattern ."), None);
+        assert_eq!(evaluate_command("uv run pytest", RuleSet::all()), None);
+        assert_eq!(
+            evaluate_command("uv --directory repo run pytest", RuleSet::all()),
+            None
+        );
+        assert_eq!(evaluate_command("uvx ruff check .", RuleSet::all()), None);
+        assert_eq!(evaluate_command("rg pattern .", RuleSet::all()), None);
+        assert_eq!(evaluate_command("ripgrep pattern .", RuleSet::all()), None);
     }
 
     #[test]
@@ -1821,9 +1999,9 @@ mod tests {
 
     #[test]
     fn avoids_argument_false_positives() {
-        assert_eq!(evaluate_command("echo python"), None);
-        assert_eq!(evaluate_command("printf '%s' grep"), None);
-        assert_eq!(evaluate_command("uv run echo init"), None);
+        assert_eq!(evaluate_command("echo python", RuleSet::all()), None);
+        assert_eq!(evaluate_command("printf '%s' grep", RuleSet::all()), None);
+        assert_eq!(evaluate_command("uv run echo init", RuleSet::all()), None);
     }
 
     #[test]
@@ -1865,7 +2043,31 @@ mod tests {
             Mode::Evaluate {
                 input: InputMode::HookJson,
                 json_block_output: true,
+                rules: _,
             } => {}
+            mode => panic!("unexpected mode: {mode:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_rules_flag() {
+        let config = Config::parse([
+            "--command".to_string(),
+            "python -m pytest".to_string(),
+            "--rules".to_string(),
+            "uv".to_string(),
+        ])
+        .unwrap();
+
+        match config.mode {
+            Mode::Evaluate {
+                input: InputMode::Command(command),
+                json_block_output: false,
+                rules,
+            } => {
+                assert_eq!(command, "python -m pytest");
+                assert_eq!(rules, RuleSet::only(RuleId::Uv));
+            }
             mode => panic!("unexpected mode: {mode:?}"),
         }
     }
@@ -1876,6 +2078,8 @@ mod tests {
             "--configure-codex-hook".to_string(),
             "/tmp/hooks.json".to_string(),
             format!("/tmp/{BINARY_NAME}"),
+            "--rules".to_string(),
+            "rg".to_string(),
         ])
         .unwrap();
 
@@ -1883,30 +2087,60 @@ mod tests {
             Mode::ConfigureCodexHook {
                 settings_path,
                 binary_name,
+                rules,
             } => {
                 assert_eq!(settings_path, "/tmp/hooks.json");
                 assert_eq!(binary_name, format!("/tmp/{BINARY_NAME}"));
+                assert_eq!(rules, RuleSet::only(RuleId::Ripgrep));
             }
             mode => panic!("unexpected mode: {mode:?}"),
         }
     }
 
     #[test]
+    fn supports_selective_rule_sets() {
+        assert_eq!(
+            evaluate_command("grep -rn pattern .", RuleSet::only(RuleId::Uv)),
+            None
+        );
+        assert_eq!(
+            evaluate_command("python -m pytest", RuleSet::only(RuleId::Ripgrep)),
+            None
+        );
+        assert_eq!(
+            evaluate_command("uv init", RuleSet::only(RuleId::Ripgrep)),
+            None
+        );
+
+        let rg_only =
+            decision_message_with_rules("grep -rn pattern .", RuleSet::only(RuleId::Ripgrep));
+        assert!(rg_only.contains("rg pattern ."));
+
+        let uv_only = decision_message_with_rules("python -m pytest", RuleSet::only(RuleId::Uv));
+        assert!(uv_only.contains("uv run python -m pytest"));
+    }
+
+    #[test]
     fn updates_hook_settings_without_duplicates() {
         let mut settings = json!({});
+        let hook_command = build_hook_command(BINARY_NAME, "--claude-hook-json", RuleSet::all());
 
         update_hook_settings(
             &mut settings,
             "PreToolUse",
             "Bash",
-            &format!("{BINARY_NAME} --claude-hook-json"),
+            BINARY_NAME,
+            "--claude-hook-json",
+            &hook_command,
         )
         .unwrap();
         update_hook_settings(
             &mut settings,
             "PreToolUse",
             "Bash",
-            &format!("{BINARY_NAME} --claude-hook-json"),
+            BINARY_NAME,
+            "--claude-hook-json",
+            &hook_command,
         )
         .unwrap();
 
@@ -1918,7 +2152,7 @@ mod tests {
                   "matcher": "Bash",
                   "hooks": [{
                     "type": "command",
-                    "command": format!("{BINARY_NAME} --claude-hook-json")
+                    "command": hook_command
                   }]
                 }]
               }
@@ -1929,19 +2163,28 @@ mod tests {
     #[test]
     fn updates_codex_hook_settings_without_duplicates() {
         let mut settings = json!({});
+        let hook_command = build_hook_command(
+            &format!("/tmp/{BINARY_NAME}"),
+            "--codex-hook-json",
+            RuleSet::all(),
+        );
 
         update_hook_settings(
             &mut settings,
             "PreToolUse",
             "Bash",
-            &format!("/tmp/{BINARY_NAME} --codex-hook-json"),
+            &format!("/tmp/{BINARY_NAME}"),
+            "--codex-hook-json",
+            &hook_command,
         )
         .unwrap();
         update_hook_settings(
             &mut settings,
             "PreToolUse",
             "Bash",
-            &format!("/tmp/{BINARY_NAME} --codex-hook-json"),
+            &format!("/tmp/{BINARY_NAME}"),
+            "--codex-hook-json",
+            &hook_command,
         )
         .unwrap();
 
@@ -1953,7 +2196,53 @@ mod tests {
                   "matcher": "Bash",
                   "hooks": [{
                     "type": "command",
-                    "command": format!("/tmp/{BINARY_NAME} --codex-hook-json")
+                    "command": hook_command
+                  }]
+                }]
+              }
+            })
+        );
+    }
+
+    #[test]
+    fn rewrites_existing_hook_command_when_rule_set_changes() {
+        let mut settings = json!({
+          "hooks": {
+            "PreToolUse": [{
+              "matcher": "Bash",
+              "hooks": [{
+                "type": "command",
+                "command": format!("/tmp/{BINARY_NAME} --codex-hook-json")
+              }]
+            }]
+          }
+        });
+
+        let new_hook_command = build_hook_command(
+            &format!("/tmp/{BINARY_NAME}"),
+            "--codex-hook-json",
+            RuleSet::only(RuleId::Ripgrep),
+        );
+
+        update_hook_settings(
+            &mut settings,
+            "PreToolUse",
+            "Bash",
+            &format!("/tmp/{BINARY_NAME}"),
+            "--codex-hook-json",
+            &new_hook_command,
+        )
+        .unwrap();
+
+        assert_eq!(
+            settings,
+            json!({
+              "hooks": {
+                "PreToolUse": [{
+                  "matcher": "Bash",
+                  "hooks": [{
+                    "type": "command",
+                    "command": new_hook_command
                   }]
                 }]
               }
