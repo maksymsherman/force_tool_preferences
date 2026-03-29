@@ -20,7 +20,7 @@ grep / egrep / fgrep        python / pip / uv init
 [![uv First](https://img.shields.io/badge/python-uv%20first-4B8BBE)](https://docs.astral.sh/uv/)
 [![Agents](https://img.shields.io/badge/Agents-Claude%20Code%20%7C%20Gemini%20%7C%20Codex-blue)](#installation)
 
-Single-process shell-hook enforcement for preferred CLI tools in Codex, Claude Code, and Gemini. `force_tool_preferences` combines the old `force_rg` and `force_uv` flows into one Rust binary, one hook command, and one installer.
+Single-process shell-hook enforcement for preferred CLI tools in Codex, Claude Code, and Gemini. `force_tool_preferences` combines the old `force_rg` and `force_uv` flows into one Rust binary, one hook command, one installer, and one shared rule catalog.
 
 </div>
 
@@ -30,7 +30,7 @@ Quick install:
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh | bash
 ```
 
-The installer builds `enforce-tool-preferences-command`, installs it to `~/.local/bin/`, enables all supported rule families by default, and configures agent hooks where possible. Its install surface is designed to scale: humans discover and shape selections with `--list-rules`, `--enable-rule`, and `--disable-rule`, while automation can keep using an exact `--rules <rule[,rule...]>` set. It requires `cargo`, plus the tool prerequisites for whichever rule families you enable.
+The installer builds `enforce-tool-preferences-command`, installs it to `~/.local/bin/`, enables all supported rule families by default, and configures agent hooks where possible. Its install surface is designed to scale: humans discover and shape selections with `--list-rules`, `--enable-rule`, and `--disable-rule`, while automation can keep using an exact `--rules <rule[,rule...]>` set. The installer and Rust CLI now read the same embedded rule catalog, so aliases, descriptions, and prerequisites stay in sync as the rule set grows. It requires `cargo`, plus the tool prerequisites for whichever rule families you enable.
 
 ## TL;DR
 
@@ -40,7 +40,7 @@ Prompt-only tool preferences drift. Agents fall back to `grep`, `python`, or `pi
 
 ### The Solution
 
-`force_tool_preferences` evaluates shell commands before execution and enforces both current rule families in one process:
+`force_tool_preferences` evaluates shell commands before execution and enforces both current rule families in one process. One shared catalog defines the currently shipped rule ids, aliases, descriptions, and prerequisites:
 
 - `grep` / `egrep` / `fgrep` -> `rg`
 - bare `python*` / `pip*` -> `uv`
@@ -56,6 +56,7 @@ When the mapping is obvious, it suggests the least invasive exact rewrite. When 
 | Exact rewrites | `grep -rn TODO .` becomes `rg TODO .`; `python -m pytest` becomes `uv run python -m pytest` | Keeps suggestions predictable and minimal |
 | Honest ambiguity handling | `pip install requests` suggests both `uv add requests` and `uv pip install requests` | Avoids pretending project metadata changes and environment mutations are the same thing |
 | Wrapper-aware parsing | Preserves `sudo`, `env`, `command`, `time`, `nohup`, `builtin`, assignments, pipes, and chained commands | Works on real shell commands instead of just toy examples |
+| Shared rule catalog | The installer and Rust CLI read the same catalog for rule ids, aliases, descriptions, and prerequisites | Reduces drift as the rule list grows from a couple of families to many |
 | Scalable rule selection | Installer supports `--list-rules`, repeated `--enable-rule`, repeated `--disable-rule`, and exact `--rules <rule[,rule...]>` | Scales to many rule families without adding a new `--only-foo` flag every time |
 | Rule-aware hook updates | Reinstalling with a different rule selection updates the existing hook entry instead of appending duplicates | Keeps agent config clean over time |
 
@@ -95,6 +96,7 @@ curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preference
   | bash -s -- --disable-rule uv
 
 # Direct CLI evaluation.
+enforce-tool-preferences-command --list-rules
 enforce-tool-preferences-command --command 'grep -rn TODO .'
 enforce-tool-preferences-command --command 'python -m pytest'
 enforce-tool-preferences-command --command 'pip install requests'
@@ -178,23 +180,27 @@ Typical outcomes:
 
 The hook boundary is where enforcement actually matters, so the combined binary owns both current rule families. Adding another family later should extend the dispatcher, not add another long-lived pile of hooks.
 
-### 2. Stable Rule IDs, Not One-Off Installer Flags
+### 2. One Shared Rule Catalog
+
+The installer and Rust CLI should not each carry their own copy of rule ids, aliases, descriptions, and prerequisites. This repo now keeps one shared catalog in the installer source and has the Rust binary read it directly, so discovery output and exact-set parsing stay aligned.
+
+### 3. Stable Rule IDs, Not One-Off Installer Flags
 
 The installer surface should scale by combining stable rule ids, not by minting `--only-foo` flags forever. Humans get discovery and additive/subtractive selection; scripts get an exact `--rules` value that stays easy to diff and automate.
 
-### 3. Smallest Correct Rewrite
+### 4. Smallest Correct Rewrite
 
 If the preferred tool already implies a flag, the suggestion drops the redundant noise. `grep -rn pattern .` becomes `rg pattern .`, not `rg -rn pattern .`.
 
-### 4. Preserve the Original Shell Shape
+### 5. Preserve the Original Shell Shape
 
 The evaluator rewrites only the command portion. Wrapper commands and shell context stay intact so the suggestion still matches the original execution environment.
 
-### 5. Block on Uncertainty
+### 6. Block on Uncertainty
 
 If `rg` flag semantics are unclear or a `pip` command could mean two different things, the tool does not invent certainty. Blocking is better than a subtly wrong rewrite.
 
-### 6. Guidance and Enforcement Are Separate
+### 7. Guidance and Enforcement Are Separate
 
 `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` can teach preferred tool choices before a command runs. The binary enforces those choices when a shell command is actually about to execute.
 
@@ -286,6 +292,12 @@ What it does:
 5. Configures Gemini CLI automatically if `~/.gemini/` already exists.
 6. Ensures Codex has `codex_hooks = true` in `${CODEX_HOME:-~/.codex}/config.toml`.
 7. Updates the Claude, Gemini, and Codex hook commands with the selected `--rules` value.
+
+Shared catalog note:
+
+- `install.sh --list-rules` and `enforce-tool-preferences-command --list-rules` read the same catalog.
+- `--rules` parsing in the Rust CLI accepts the same ids and aliases the installer documents.
+- Adding a new family now means extending the enforcement logic and updating one catalog entry, instead of hand-syncing multiple docs and option tables.
 
 Rule selection model:
 
@@ -417,6 +429,14 @@ enforce-tool-preferences-command --command 'pip install requests'
 ```
 
 ## Command Reference
+
+### `--list-rules`
+
+Print the shared rule catalog that both the installer and Rust CLI use.
+
+```sh
+enforce-tool-preferences-command --list-rules
+```
 
 ### `--command '<shell command>'`
 
@@ -669,14 +689,23 @@ Those files are optional prompt-level guidance. The binary and hooks are the act
 ## Architecture
 
 ```text
-                               install.sh
+                     shared rule catalog in install.sh
                                    |
-                 +-----------------+-----------------+
-                 |                 |                 |
-                 v                 v                 v
-       build release binary   update agent hooks   enable Codex feature flag
-                 |                 |                 |
-                 v                 v                 v
+                    +--------------+--------------+
+                    |                             |
+                    v                             v
+               installer UI              Rust CLI rule metadata
+                    |                             |
+                    v                             v
+               install.sh             enforce-tool-preferences-command
+                    |                             |
+       +------------+------------+                |
+       |            |            |                |
+       v            v            v                v
+ build binary  update hooks  enable Codex   parse commands + enforce rules
+                    feature flag
+       |
+       v
  ~/.local/bin/enforce-tool-preferences-command   ~/.claude / ~/.gemini / ~/.codex
 
 
@@ -703,11 +732,13 @@ Those files are optional prompt-level guidance. The binary and hooks are the act
 
 Data flow summary:
 
-1. The agent invokes a shell command or sends a hook payload.
-2. `enforce-tool-preferences-command` tokenizes the command while preserving wrapper context.
-3. The rule dispatcher evaluates only the enabled families from `--rules`.
-4. Safe rewrites are rendered directly; ambiguous cases are blocked with guidance.
-5. Allowed commands exit cleanly; hook modes emit the format their runtime expects.
+1. The shared catalog in `install.sh` defines the shipped rule ids, aliases, descriptions, and prerequisites.
+2. The installer uses that catalog for listing, validation, prerequisites, and exact-set resolution.
+3. `enforce-tool-preferences-command` reads the same catalog for `--list-rules`, aliases, and `--rules` parsing.
+4. When an agent invokes a shell command or sends a hook payload, the binary tokenizes the command while preserving wrapper context.
+5. The rule dispatcher evaluates only the enabled families from `--rules`.
+6. Safe rewrites are rendered directly; ambiguous cases are blocked with guidance.
+7. Allowed commands exit cleanly; hook modes emit the format their runtime expects.
 
 ## Troubleshooting
 
@@ -784,6 +815,10 @@ No. It blocks and prints the exact rewrite or likely alternatives. That keeps th
 ### Can I enable only one rule family?
 
 Yes. The preferred installer form is `--enable-rule rg` or `--enable-rule uv`. For automation or manual hook configuration, use `--rules rg` or `--rules uv`. The older `--only-rg` and `--only-uv` aliases still work, but they are kept only for compatibility.
+
+### How do I add another rule family cleanly?
+
+Add the enforcement logic in Rust, then add one catalog row in `install.sh` for the new rule id, aliases, description, and prerequisites. That keeps installer discovery and CLI parsing aligned without maintaining separate rule tables.
 
 ### Why does `pip install requests` return two answers?
 

@@ -3,6 +3,7 @@ use std::env;
 use std::fs;
 use std::io::{self, Read};
 use std::process;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use serde_json::{json, Map, Value};
@@ -12,6 +13,9 @@ const BINARY_NAME: &str = "enforce-tool-preferences-command";
 const GREP_MESSAGE: &str = "Use rg (ripgrep) instead of grep in this project. Replace blocked grep commands with the least invasive exact rg rewrite when the flag mapping is clear. If a flag does not have a guaranteed direct rg translation, translate it manually instead of guessing.";
 const PYTHON_MESSAGE: &str = "Use uv instead of bare Python or pip commands in this project. Replace the blocked command with 'uv run ...', 'uv add ...', 'uv add --dev ...', 'uv remove ...', or 'uv run --with ...' as appropriate.";
 const UV_INIT_MESSAGE: &str = "Do not run 'uv init' in an existing project unless the user explicitly asks for project creation or conversion. Inspect the repo first and prefer 'uv run', 'uv add', 'uv sync', or 'uv run --with'. If project initialization is truly needed, use 'uv init --no-readme --no-workspace' to avoid overwriting existing files and git history.";
+const INSTALL_SH_SOURCE: &str = include_str!("../install.sh");
+const SHARED_RULE_CATALOG_BEGIN: &str = "# BEGIN_SHARED_RULE_CATALOG";
+const SHARED_RULE_CATALOG_END: &str = "# END_SHARED_RULE_CATALOG";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RuleId {
@@ -19,32 +23,35 @@ enum RuleId {
     Uv = 1,
 }
 
-const RIPGREP_ALIASES: &[&str] = &["ripgrep"];
-const UV_ALIASES: &[&str] = &[];
 const RULE_IDS: [RuleId; 2] = [RuleId::Ripgrep, RuleId::Uv];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RuleSpec {
-    cli_name: &'static str,
-    aliases: &'static [&'static str],
+    manifest_id: &'static str,
     guidance: &'static str,
 }
 
 const RULE_SPECS: [RuleSpec; 2] = [
     RuleSpec {
-        cli_name: "rg",
-        aliases: RIPGREP_ALIASES,
+        manifest_id: "rg",
         guidance: GREP_MESSAGE,
     },
     RuleSpec {
-        cli_name: "uv",
-        aliases: UV_ALIASES,
+        manifest_id: "uv",
         guidance: PYTHON_MESSAGE,
     },
 ];
 
 fn rule_spec(rule: RuleId) -> &'static RuleSpec {
     &RULE_SPECS[rule as usize]
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RuleCatalogEntry {
+    cli_name: &'static str,
+    aliases: SmallVec<[&'static str; 4]>,
+    description: &'static str,
+    prerequisites: SmallVec<[&'static str; 4]>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -102,7 +109,7 @@ impl RuleSet {
 
         for rule in RULE_IDS {
             if self.contains(rule) {
-                names.push(rule_spec(rule).cli_name);
+                names.push(rule_catalog_entry(rule).cli_name);
             }
         }
 
@@ -117,17 +124,97 @@ fn rule_mask(rule: RuleId) -> u32 {
     }
 }
 
+fn shared_rule_catalog() -> &'static [RuleCatalogEntry] {
+    static RULE_CATALOG: OnceLock<Vec<RuleCatalogEntry>> = OnceLock::new();
+    RULE_CATALOG
+        .get_or_init(parse_shared_rule_catalog)
+        .as_slice()
+}
+
+fn parse_shared_rule_catalog() -> Vec<RuleCatalogEntry> {
+    extract_shared_rule_catalog(INSTALL_SH_SOURCE)
+        .lines()
+        .filter_map(parse_rule_catalog_entry)
+        .collect()
+}
+
+fn extract_shared_rule_catalog(source: &'static str) -> &'static str {
+    let start = source
+        .find(SHARED_RULE_CATALOG_BEGIN)
+        .unwrap_or_else(|| panic!("missing {SHARED_RULE_CATALOG_BEGIN} in install.sh"));
+    let after_start = &source[start + SHARED_RULE_CATALOG_BEGIN.len()..];
+    let after_start = after_start
+        .strip_prefix('\n')
+        .unwrap_or_else(|| panic!("expected newline after {SHARED_RULE_CATALOG_BEGIN}"));
+    let end = after_start
+        .find(SHARED_RULE_CATALOG_END)
+        .unwrap_or_else(|| panic!("missing {SHARED_RULE_CATALOG_END} in install.sh"));
+    after_start[..end].trim()
+}
+
+fn parse_rule_catalog_entry(line: &'static str) -> Option<RuleCatalogEntry> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+
+    let mut fields = line.split('\t');
+    let cli_name = fields
+        .next()
+        .unwrap_or_else(|| panic!("invalid shared rule catalog row: '{line}'"));
+    let aliases = fields
+        .next()
+        .unwrap_or_else(|| panic!("missing aliases field in shared rule catalog row: '{line}'"));
+    let description = fields.next().unwrap_or_else(|| {
+        panic!("missing description field in shared rule catalog row: '{line}'")
+    });
+    let prerequisites = fields.next().unwrap_or_else(|| {
+        panic!("missing prerequisites field in shared rule catalog row: '{line}'")
+    });
+
+    if fields.next().is_some() {
+        panic!("too many fields in shared rule catalog row: '{line}'");
+    }
+
+    Some(RuleCatalogEntry {
+        cli_name,
+        aliases: parse_catalog_list(aliases),
+        description,
+        prerequisites: parse_catalog_list(prerequisites),
+    })
+}
+
+fn parse_catalog_list(field: &'static str) -> SmallVec<[&'static str; 4]> {
+    if field.is_empty() || field == "-" {
+        return SmallVec::new();
+    }
+
+    field
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .collect()
+}
+
+fn rule_catalog_entry(rule: RuleId) -> &'static RuleCatalogEntry {
+    let manifest_id = rule_spec(rule).manifest_id;
+    shared_rule_catalog()
+        .iter()
+        .find(|entry| entry.cli_name == manifest_id)
+        .unwrap_or_else(|| panic!("missing shared rule catalog entry for {manifest_id}"))
+}
+
 fn rule_id_for_cli_name(name: &str) -> Option<RuleId> {
     RULE_IDS.iter().copied().find(|rule| {
-        let spec = rule_spec(*rule);
-        spec.cli_name == name || spec.aliases.iter().any(|alias| *alias == name)
+        let entry = rule_catalog_entry(*rule);
+        entry.cli_name == name || entry.aliases.iter().any(|alias| *alias == name)
     })
 }
 
 fn supported_rule_names() -> String {
-    RULE_IDS
+    shared_rule_catalog()
         .iter()
-        .map(|rule| rule_spec(*rule).cli_name)
+        .map(|entry| entry.cli_name)
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -161,6 +248,10 @@ fn run() -> Result<i32, String> {
     let config = Config::parse(env::args().skip(1))?;
 
     match config.mode {
+        Mode::ListRules => {
+            print_rule_catalog();
+            Ok(0)
+        }
         Mode::Evaluate {
             input,
             json_block_output,
@@ -251,6 +342,7 @@ struct Config {
 
 #[derive(Debug)]
 enum Mode {
+    ListRules,
     Evaluate {
         input: InputMode,
         json_block_output: bool,
@@ -296,6 +388,7 @@ impl Config {
         let mut configure_claude_hook: Option<(String, String)> = None;
         let mut configure_gemini_hook: Option<(String, String)> = None;
         let mut configure_codex_hook: Option<(String, String)> = None;
+        let mut list_rules = false;
         let mut iterations = 100_000u64;
         let mut rules = RuleSet::all();
 
@@ -307,6 +400,9 @@ impl Config {
                         .next()
                         .ok_or_else(|| "missing value for --rules".to_string())?;
                     rules = RuleSet::parse(&value)?;
+                }
+                "--list-rules" => {
+                    list_rules = true;
                 }
                 "--command" => {
                     let value = iter
@@ -388,6 +484,21 @@ impl Config {
             }
         }
 
+        if list_rules {
+            if input.is_some()
+                || benchmark_command.is_some()
+                || configure_claude_hook.is_some()
+                || configure_gemini_hook.is_some()
+                || configure_codex_hook.is_some()
+            {
+                return Err("--list-rules cannot be combined with another mode".to_string());
+            }
+
+            return Ok(Self {
+                mode: Mode::ListRules,
+            });
+        }
+
         if let Some(command) = benchmark_command {
             return Ok(Self {
                 mode: Mode::Benchmark {
@@ -446,11 +557,33 @@ fn print_usage() {
     let rule_csv_example = RuleSet::all().cli_value();
 
     println!(
-        "Usage:\n  {0} --command \"grep -rn pattern .\" [--claude-json] [--rules <rule[,rule...]>]\n  {0} --stdin-command [--claude-json] [--rules <rule[,rule...]>]\n  {0} --claude-hook-json [--rules <rule[,rule...]>]\n  {0} --codex-hook-json [--rules <rule[,rule...]>]\n  {0} --gemini-hook-json [--rules <rule[,rule...]>]\n  {0} --benchmark-command \"grep -rn pattern .\" [--iterations 1000000] [--rules <rule[,rule...]>]\n  {0} --configure-claude-hook <settings-path> <binary-name> [--rules <rule[,rule...]>]\n  {0} --configure-gemini-hook <settings-path> <binary-name> [--rules <rule[,rule...]>]\n  {0} --configure-codex-hook <hooks-path> <binary-name> [--rules <rule[,rule...]>]\n\nSupported rule ids: {1}\nExample exact set: --rules {2}",
+        "Usage:\n  {0} --list-rules\n  {0} --command \"grep -rn pattern .\" [--claude-json] [--rules <rule[,rule...]>]\n  {0} --stdin-command [--claude-json] [--rules <rule[,rule...]>]\n  {0} --claude-hook-json [--rules <rule[,rule...]>]\n  {0} --codex-hook-json [--rules <rule[,rule...]>]\n  {0} --gemini-hook-json [--rules <rule[,rule...]>]\n  {0} --benchmark-command \"grep -rn pattern .\" [--iterations 1000000] [--rules <rule[,rule...]>]\n  {0} --configure-claude-hook <settings-path> <binary-name> [--rules <rule[,rule...]>]\n  {0} --configure-gemini-hook <settings-path> <binary-name> [--rules <rule[,rule...]>]\n  {0} --configure-codex-hook <hooks-path> <binary-name> [--rules <rule[,rule...]>]\n\nSupported rule ids: {1}\nExample exact set: --rules {2}",
         BINARY_NAME,
         supported_rule_names(),
         rule_csv_example,
     );
+}
+
+fn print_rule_catalog() {
+    println!("Supported rule ids:");
+
+    for entry in shared_rule_catalog() {
+        println!("  {}", entry.cli_name);
+        println!("    Description: {}", entry.description);
+        println!("    Aliases: {}", format_catalog_values(&entry.aliases));
+        println!(
+            "    Requires: {}",
+            format_catalog_values(&entry.prerequisites)
+        );
+    }
+}
+
+fn format_catalog_values(values: &[&str]) -> String {
+    if values.is_empty() {
+        return "<none>".to_string();
+    }
+
+    values.join(", ")
 }
 
 fn read_stdin() -> Result<String, String> {
@@ -2098,6 +2231,27 @@ mod tests {
             }
             mode => panic!("unexpected mode: {mode:?}"),
         }
+    }
+
+    #[test]
+    fn parses_list_rules_flag() {
+        let config = Config::parse(["--list-rules".to_string()]).unwrap();
+
+        match config.mode {
+            Mode::ListRules => {}
+            mode => panic!("unexpected mode: {mode:?}"),
+        }
+    }
+
+    #[test]
+    fn reads_shared_rule_catalog_from_install_script() {
+        let catalog = shared_rule_catalog();
+
+        assert_eq!(catalog.len(), 2);
+        assert_eq!(catalog[0].cli_name, "rg");
+        assert_eq!(catalog[0].aliases.as_slice(), ["ripgrep"]);
+        assert_eq!(catalog[1].cli_name, "uv");
+        assert!(catalog[1].aliases.is_empty());
     }
 
     #[test]

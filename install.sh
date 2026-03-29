@@ -4,7 +4,6 @@ set -euo pipefail
 REPO="https://github.com/maksymsherman/force_tool_preferences.git"
 INSTALL_DIR="${HOME}/.local/bin"
 BINARY_NAME="enforce-tool-preferences-command"
-SUPPORTED_RULES=(rg uv)
 CHECK_BINARY_HASH=0
 OVERWRITE_BINARY=0
 DRY_RUN=0
@@ -18,6 +17,15 @@ info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 ok()    { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn()  { printf '\033[1;33m==>\033[0m %s\n' "$*"; }
 err()   { printf '\033[1;31m==>\033[0m %s\n' "$*" >&2; }
+
+rule_manifest() {
+  cat <<'EOF'
+# BEGIN_SHARED_RULE_CATALOG
+rg	ripgrep	grep-family -> rg enforcement	cargo,rg
+uv	-	python/pip-family -> uv enforcement	cargo,uv
+# END_SHARED_RULE_CATALOG
+EOF
+}
 
 usage() {
   cat <<'EOF'
@@ -42,72 +50,88 @@ Options:
 EOF
 }
 
+each_rule_manifest_row() {
+  local line
+
+  while IFS= read -r line; do
+    case "$line" in
+      '# BEGIN_SHARED_RULE_CATALOG'|'# END_SHARED_RULE_CATALOG'|'')
+        continue
+        ;;
+      \#*)
+        continue
+        ;;
+      *)
+        printf '%s\n' "$line"
+        ;;
+    esac
+  done < <(rule_manifest)
+}
+
+format_csv_for_display() {
+  local value="$1"
+  local output=""
+  local item
+  local items=()
+
+  if [ -z "$value" ] || [ "$value" = "-" ]; then
+    printf '<none>\n'
+    return
+  fi
+
+  IFS=',' read -r -a items <<< "$value"
+  for item in "${items[@]}"; do
+    [ -z "$item" ] && continue
+    if [ -n "$output" ]; then
+      output="$output, "
+    fi
+    output="$output$item"
+  done
+
+  if [ -z "$output" ]; then
+    printf '<none>\n'
+    return
+  fi
+
+  printf '%s\n' "$output"
+}
+
 canonicalize_rule_name() {
-  case "${1// /}" in
-    rg|ripgrep)
-      printf 'rg\n'
-      ;;
-    uv)
-      printf 'uv\n'
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
+  local name="${1// /}"
+  local cli_name aliases description prerequisites alias aliases_list=()
 
-rule_description() {
-  case "$1" in
-    rg)
-      printf 'grep-family -> rg enforcement\n'
-      ;;
-    uv)
-      printf 'python/pip-family -> uv enforcement\n'
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
+  while IFS=$'\t' read -r cli_name aliases description prerequisites; do
+    if [ "$cli_name" = "$name" ]; then
+      printf '%s\n' "$cli_name"
+      return 0
+    fi
 
-rule_prerequisites() {
-  case "$1" in
-    rg)
-      printf 'cargo, rg\n'
-      ;;
-    uv)
-      printf 'cargo, uv\n'
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
+    if [ -z "$aliases" ] || [ "$aliases" = "-" ]; then
+      continue
+    fi
 
-rule_aliases() {
-  case "$1" in
-    rg)
-      printf 'ripgrep\n'
-      ;;
-    uv)
-      printf '<none>\n'
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+    IFS=',' read -r -a aliases_list <<< "$aliases"
+    for alias in "${aliases_list[@]}"; do
+      if [ "$alias" = "$name" ]; then
+        printf '%s\n' "$cli_name"
+        return 0
+      fi
+    done
+  done < <(each_rule_manifest_row)
+
+  return 1
 }
 
 supported_rules_display() {
   local output=""
-  local rule
+  local cli_name aliases description prerequisites
 
-  for rule in "${SUPPORTED_RULES[@]}"; do
+  while IFS=$'\t' read -r cli_name aliases description prerequisites; do
     if [ -n "$output" ]; then
       output="$output, "
     fi
-    output="$output$rule"
-  done
+    output="$output$cli_name"
+  done < <(each_rule_manifest_row)
 
   printf '%s\n' "$output"
 }
@@ -162,11 +186,11 @@ csv_remove_rule() {
 
 supported_rules_csv() {
   local output=""
-  local rule
+  local cli_name aliases description prerequisites
 
-  for rule in "${SUPPORTED_RULES[@]}"; do
-    output="$(csv_add_rule "$output" "$rule")"
-  done
+  while IFS=$'\t' read -r cli_name aliases description prerequisites; do
+    output="$(csv_add_rule "$output" "$cli_name")"
+  done < <(each_rule_manifest_row)
 
   printf '%s\n' "$output"
 }
@@ -279,21 +303,72 @@ resolve_rules() {
 }
 
 list_rules() {
-  local rule
+  local cli_name aliases description prerequisites
 
   echo "Supported rule families:"
-  for rule in "${SUPPORTED_RULES[@]}"; do
-    echo "  $rule"
-    echo "    Description: $(rule_description "$rule")"
-    echo "    Aliases: $(rule_aliases "$rule")"
-    echo "    Requires: $(rule_prerequisites "$rule")"
-  done
+  while IFS=$'\t' read -r cli_name aliases description prerequisites; do
+    echo "  $cli_name"
+    echo "    Description: $description"
+    echo "    Aliases: $(format_csv_for_display "$aliases")"
+    echo "    Requires: $(format_csv_for_display "$prerequisites")"
+  done < <(each_rule_manifest_row)
 }
 
 rule_enabled() {
   local rule="$1"
 
   csv_contains_rule "$RULES" "$rule"
+}
+
+missing_prerequisite_message() {
+  local tool_name="$1"
+  local rule_name="$2"
+
+  case "$tool_name" in
+    cargo)
+      printf "cargo not found. Install Rust first: https://rustup.rs\n"
+      ;;
+    rg)
+      printf "rg not found. Install ripgrep first: https://github.com/BurntSushi/ripgrep#installation\n"
+      ;;
+    uv)
+      printf "uv not found. Install uv first: https://docs.astral.sh/uv/\n"
+      ;;
+    *)
+      printf "required tool '%s' not found for enabled rule '%s'\n" "$tool_name" "$rule_name"
+      ;;
+  esac
+}
+
+check_enabled_rule_prerequisites() {
+  local checked=""
+  local cli_name aliases description prerequisites tool tools=()
+
+  while IFS=$'\t' read -r cli_name aliases description prerequisites; do
+    if ! rule_enabled "$cli_name"; then
+      continue
+    fi
+
+    if [ -z "$prerequisites" ] || [ "$prerequisites" = "-" ]; then
+      continue
+    fi
+
+    IFS=',' read -r -a tools <<< "$prerequisites"
+    for tool in "${tools[@]}"; do
+      [ -z "$tool" ] && continue
+
+      if csv_contains_rule "$checked" "$tool"; then
+        continue
+      fi
+
+      if ! command -v "$tool" &>/dev/null; then
+        err "$(missing_prerequisite_message "$tool" "$cli_name")"
+        exit 1
+      fi
+
+      checked="$(csv_add_rule "$checked" "$tool")"
+    done
+  done < <(each_rule_manifest_row)
 }
 
 hash_file() {
@@ -486,20 +561,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
   exit 0
 fi
 
-if ! command -v cargo &>/dev/null; then
-  err "cargo not found. Install Rust first: https://rustup.rs"
-  exit 1
-fi
-
-if rule_enabled rg && ! command -v rg &>/dev/null; then
-  err "rg not found. Install ripgrep first: https://github.com/BurntSushi/ripgrep#installation"
-  exit 1
-fi
-
-if rule_enabled uv && ! command -v uv &>/dev/null; then
-  err "uv not found. Install uv first: https://docs.astral.sh/uv/"
-  exit 1
-fi
+check_enabled_rule_prerequisites
 
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
