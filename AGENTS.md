@@ -7,6 +7,7 @@ Combined shell-hook enforcement for preferred CLI tools in agent workflows.
 - Never run `grep`, `egrep`, or `fgrep`; use `rg` instead.
 - Never run bare `python`, `python3`, `pip`, or `pip3`; use `uv` instead.
 - Never run `uv init` in an existing repo unless the user explicitly asks for project creation or conversion.
+- Agents may temporarily lower `perf_event_paranoid` for profiling or test runs that require `perf`, but they must record the original value first and restore it immediately after the script finishes, even if the run fails.
 
 ## Command mapping
 
