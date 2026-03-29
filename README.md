@@ -20,27 +20,33 @@ grep / egrep / fgrep        python / pip / uv init
 [![uv First](https://img.shields.io/badge/python-uv%20first-4B8BBE)](https://docs.astral.sh/uv/)
 [![Agents](https://img.shields.io/badge/Agents-Claude%20Code%20%7C%20Gemini%20%7C%20Codex-blue)](#installation)
 
-Single-process shell-hook enforcement for preferred CLI tools in Codex, Claude Code, and Gemini. `force_tool_preferences` combines the old `force_rg` and `force_uv` flows into one Rust binary, one hook command, one installer, and one shared rule catalog.
+One Rust hook that blocks the wrong CLI before it runs and tells agents what to use instead. `force_tool_preferences` combines the old `force_rg` and `force_uv` flows into one binary, one installer, and one shared rule catalog for Codex, Claude Code, and Gemini.
 
 </div>
 
-Quick install:
+**Quick Install**
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh | bash
 ```
 
-The installer builds `enforce-tool-preferences-command`, installs it to `~/.local/bin/`, enables all supported rule families by default, and configures agent hooks where possible. Its install surface is designed to scale: humans discover and shape selections with `--list-rules`, `--enable-rule`, and `--disable-rule`, while automation can keep using an exact `--rules <rule[,rule...]>` set. The installer and Rust CLI now read the same embedded rule catalog, so aliases, descriptions, and prerequisites stay in sync as the rule set grows. It requires `cargo`, plus the tool prerequisites for whichever rule families you enable.
+The default install builds `enforce-tool-preferences-command`, installs it to `~/.local/bin/`, enables every shipped rule family, and configures supported agent hooks where possible.
+
+At a glance:
+
+| Need | Use |
+|---|---|
+| Discover the shipped rule families | `--list-rules` |
+| Install only `grep` -> `rg` enforcement | `--enable-rule rg` |
+| Install only `python`/`pip` -> `uv` enforcement | `--enable-rule uv` |
+| Keep a reproducible exact set in dotfiles or CI | `--rules rg,uv` |
+| Check a command directly | `enforce-tool-preferences-command --command 'grep -rn TODO .'` |
 
 ## TL;DR
 
-### The Problem
+**The Problem:** Prompt-only tool preferences drift. Agents still fall back to `grep`, `python`, or `pip`, and separate per-tool hooks multiply startup cost, config churn, and places where policy can get out of sync.
 
-Prompt-only tool preferences drift. Agents fall back to `grep`, `python`, or `pip`, and separate per-tool hooks add repeated process startup, repeated config management, and repeated places for policy to get out of sync.
-
-### The Solution
-
-`force_tool_preferences` evaluates shell commands before execution and enforces both current rule families in one process. One shared catalog defines the currently shipped rule ids, aliases, descriptions, and prerequisites:
+**The Solution:** `force_tool_preferences` evaluates shell commands at the hook boundary and enforces both current rule families in one process:
 
 - `grep` / `egrep` / `fgrep` -> `rg`
 - bare `python*` / `pip*` -> `uv`
@@ -75,19 +81,19 @@ Common outcomes:
 ## Quick Example
 
 ```sh
-# See the currently shipped rule families before choosing a subset.
+# See the current rule catalog before enabling anything.
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
   | bash -s -- --list-rules
 
-# Inspect the installer without cloning, building, or writing anything.
+# Inspect the installer without cloning, building, or writing files.
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
   | bash -s -- --dry-run
 
-# Default install: enable both rg and uv enforcement.
+# Default install: enable every shipped rule family.
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
   | bash
 
-# Install only grep-family -> rg enforcement.
+# Install just grep-family -> rg enforcement.
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
   | bash -s -- --enable-rule rg
 
@@ -105,7 +111,7 @@ enforce-tool-preferences-command --command 'pip install requests'
 enforce-tool-preferences-command --command 'grep -rn TODO .' --rules rg
 enforce-tool-preferences-command --command 'python -m pytest' --rules uv
 
-# Codex or Claude hook JSON input.
+# Hook payload input.
 printf '%s' '{"tool_input":{"command":"grep -rn TODO ."}}' \
   | enforce-tool-preferences-command --codex-hook-json --rules rg,uv
 
@@ -277,7 +283,7 @@ When `force_tool_preferences` might not be ideal:
 
 ### 1. Installer script
 
-This is the default path:
+This is the default path and the fastest way to get hooks installed:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh | bash
@@ -293,7 +299,7 @@ What it does:
 6. Ensures Codex has `codex_hooks = true` in `${CODEX_HOME:-~/.codex}/config.toml`.
 7. Updates the Claude, Gemini, and Codex hook commands with the selected `--rules` value.
 
-Shared catalog note:
+Why this path exists:
 
 - `install.sh --list-rules` and `enforce-tool-preferences-command --list-rules` read the same catalog.
 - `--rules` parsing in the Rust CLI accepts the same ids and aliases the installer documents.
@@ -355,6 +361,8 @@ Prerequisites:
 
 ### 2. Build from source
 
+Use this when you want the binary locally but do not want the remote installer path:
+
 ```sh
 git clone https://github.com/maksymsherman/force_tool_preferences.git
 cd force_tool_preferences
@@ -363,12 +371,23 @@ mkdir -p ~/.local/bin
 cp target/release/enforce-tool-preferences-command ~/.local/bin/
 ```
 
-Then configure hooks manually:
+Then configure hooks manually for the agent runtimes you use:
 
 ```sh
-mkdir -p ~/.codex
+mkdir -p ~/.claude ~/.gemini ~/.codex
+[ -f ~/.claude/settings.json ] || printf '{}\n' > ~/.claude/settings.json
+[ -f ~/.gemini/settings.json ] || printf '{}\n' > ~/.gemini/settings.json
 [ -f ~/.codex/hooks.json ] || printf '{}\n' > ~/.codex/hooks.json
-./target/release/enforce-tool-preferences-command \
+
+~/.local/bin/enforce-tool-preferences-command \
+  --configure-claude-hook ~/.claude/settings.json ~/.local/bin/enforce-tool-preferences-command \
+  --rules rg,uv
+
+~/.local/bin/enforce-tool-preferences-command \
+  --configure-gemini-hook ~/.gemini/settings.json ~/.local/bin/enforce-tool-preferences-command \
+  --rules rg,uv
+
+~/.local/bin/enforce-tool-preferences-command \
   --configure-codex-hook ~/.codex/hooks.json ~/.local/bin/enforce-tool-preferences-command \
   --rules rg,uv
 ```
@@ -379,6 +398,28 @@ For Codex, also ensure `~/.codex/config.toml` contains:
 [features]
 codex_hooks = true
 ```
+
+### 3. Local development checkout
+
+Use this when you are working on the repo itself and want to test behavior before installing anything to `~/.local/bin`:
+
+```sh
+git clone https://github.com/maksymsherman/force_tool_preferences.git
+cd force_tool_preferences
+cargo run -- --list-rules
+cargo run -- --command 'grep -rn TODO .'
+cargo run -- --command 'python -m pytest'
+```
+
+This path is useful for development and verification, but it is not the recommended long-term hook target because agent configs should point to a stable binary path.
+
+### Package managers and prebuilt binaries
+
+There is no Homebrew, Scoop, npm, Cargo install, or prebuilt binary release path documented in this repo today. The supported install methods are:
+
+- the remote `install.sh` flow
+- a local source build copied into `~/.local/bin`
+- a development checkout used directly with `cargo run`
 
 ## Quick Start
 
@@ -395,7 +436,7 @@ curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preference
 ### 2. Install the rule families you want
 
 ```sh
-# Default: both families
+# Default: both shipped families
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
   | bash
 
@@ -427,6 +468,12 @@ enforce-tool-preferences-command --command 'grep -rn TODO .'
 enforce-tool-preferences-command --command 'python -m pytest'
 enforce-tool-preferences-command --command 'pip install requests'
 ```
+
+Expected behavior:
+
+- blocked direct CLI calls exit with status `2`
+- hook JSON modes emit the block payload expected by the runtime
+- allowed commands exit `0` without output
 
 ## Command Reference
 
