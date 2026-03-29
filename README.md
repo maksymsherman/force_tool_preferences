@@ -30,7 +30,7 @@ Quick install:
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh | bash
 ```
 
-The installer builds `enforce-tool-preferences-command`, installs it to `~/.local/bin/`, enables both rule families by default, and configures agent hooks where possible. It can also scope installation to just `rg` or just `uv` rules. It requires `cargo`, plus `rg` when `rg` rules are enabled and `uv` when `uv` rules are enabled.
+The installer builds `enforce-tool-preferences-command`, installs it to `~/.local/bin/`, enables all supported rule families by default, and configures agent hooks where possible. Its install surface is designed to scale: humans discover and shape selections with `--list-rules`, `--enable-rule`, and `--disable-rule`, while automation can keep using an exact `--rules <rule[,rule...]>` set. It requires `cargo`, plus the tool prerequisites for whichever rule families you enable.
 
 ## TL;DR
 
@@ -56,7 +56,7 @@ When the mapping is obvious, it suggests the least invasive exact rewrite. When 
 | Exact rewrites | `grep -rn TODO .` becomes `rg TODO .`; `python -m pytest` becomes `uv run python -m pytest` | Keeps suggestions predictable and minimal |
 | Honest ambiguity handling | `pip install requests` suggests both `uv add requests` and `uv pip install requests` | Avoids pretending project metadata changes and environment mutations are the same thing |
 | Wrapper-aware parsing | Preserves `sudo`, `env`, `command`, `time`, `nohup`, `builtin`, assignments, pipes, and chained commands | Works on real shell commands instead of just toy examples |
-| Selective rule families | Installer and hooks support `--rules rg`, `--rules uv`, and `--rules rg,uv` | Lets you adopt one policy family without carrying the other |
+| Scalable rule selection | Installer supports `--list-rules`, repeated `--enable-rule`, repeated `--disable-rule`, and exact `--rules <rule[,rule...]>` | Scales to many rule families without adding a new `--only-foo` flag every time |
 | Rule-aware hook updates | Reinstalling with a different rule selection updates the existing hook entry instead of appending duplicates | Keeps agent config clean over time |
 
 Common outcomes:
@@ -74,6 +74,10 @@ Common outcomes:
 ## Quick Example
 
 ```sh
+# See the currently shipped rule families before choosing a subset.
+curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
+  | bash -s -- --list-rules
+
 # Inspect the installer without cloning, building, or writing anything.
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
   | bash -s -- --dry-run
@@ -84,7 +88,11 @@ curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preference
 
 # Install only grep-family -> rg enforcement.
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
-  | bash -s -- --only-rg
+  | bash -s -- --enable-rule rg
+
+# Start from the default all-rules install and subtract one family.
+curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
+  | bash -s -- --disable-rule uv
 
 # Direct CLI evaluation.
 enforce-tool-preferences-command --command 'grep -rn TODO .'
@@ -126,7 +134,7 @@ Choose `uv add` for project dependencies; choose `uv pip` to keep pip-style beha
 {"decision":"block","reason":"Use rg (ripgrep) instead of grep in this project. Replace blocked grep commands with the least invasive exact rg rewrite when the flag mapping is clear. If a flag does not have a guaranteed direct rg translation, translate it manually instead of guessing.\nSuggested replacement:\n  rg TODO ."}
 ```
 
-## Current Rules
+## Current Shipped Rules
 
 ### grep-family -> `rg`
 
@@ -170,19 +178,23 @@ Typical outcomes:
 
 The hook boundary is where enforcement actually matters, so the combined binary owns both current rule families. Adding another family later should extend the dispatcher, not add another long-lived pile of hooks.
 
-### 2. Smallest Correct Rewrite
+### 2. Stable Rule IDs, Not One-Off Installer Flags
+
+The installer surface should scale by combining stable rule ids, not by minting `--only-foo` flags forever. Humans get discovery and additive/subtractive selection; scripts get an exact `--rules` value that stays easy to diff and automate.
+
+### 3. Smallest Correct Rewrite
 
 If the preferred tool already implies a flag, the suggestion drops the redundant noise. `grep -rn pattern .` becomes `rg pattern .`, not `rg -rn pattern .`.
 
-### 3. Preserve the Original Shell Shape
+### 4. Preserve the Original Shell Shape
 
 The evaluator rewrites only the command portion. Wrapper commands and shell context stay intact so the suggestion still matches the original execution environment.
 
-### 4. Block on Uncertainty
+### 5. Block on Uncertainty
 
 If `rg` flag semantics are unclear or a `pip` command could mean two different things, the tool does not invent certainty. Blocking is better than a subtly wrong rewrite.
 
-### 5. Guidance and Enforcement Are Separate
+### 6. Guidance and Enforcement Are Separate
 
 `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` can teach preferred tool choices before a command runs. The binary enforces those choices when a shell command is actually about to execute.
 
@@ -247,7 +259,7 @@ When to use `force_tool_preferences`:
 
 - You want hard enforcement at the shell boundary instead of relying on prompt compliance.
 - You want one install path and one hook command for both current rule families.
-- You want to enable only `rg`, only `uv`, or both, without maintaining separate repos.
+- You want a stable installer surface that can keep growing from two rule families to many without minting a new install flag per tool.
 
 When `force_tool_preferences` might not be ideal:
 
@@ -275,9 +287,23 @@ What it does:
 6. Ensures Codex has `codex_hooks = true` in `${CODEX_HOME:-~/.codex}/config.toml`.
 7. Updates the Claude, Gemini, and Codex hook commands with the selected `--rules` value.
 
+Rule selection model:
+
+| Need | Recommended flags |
+|---|---|
+| Discover what exists | `--list-rules` |
+| Pick a subset interactively | repeat `--enable-rule <name>` |
+| Start from all defaults and subtract exceptions | repeat `--disable-rule <name>` |
+| Keep a reproducible exact set in scripts, CI, or dotfiles | `--rules <rule[,rule...]>` |
+| Preserve old one-off commands during migration | `--only-rg`, `--only-uv` (supported, but deprecated) |
+
 Useful installer variants:
 
 ```sh
+# Show the current rule catalog, aliases, and prerequisites.
+curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
+  | bash -s -- --list-rules
+
 # Print planned actions without cloning, building, or writing files.
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
   | bash -s -- --dry-run
@@ -292,13 +318,17 @@ curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preference
 
 # Install only grep-family -> rg enforcement.
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
-  | bash -s -- --only-rg
+  | bash -s -- --enable-rule rg
 
 # Install only python/pip-family -> uv enforcement.
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
-  | bash -s -- --only-uv
+  | bash -s -- --enable-rule uv
 
-# Explicit rule selection.
+# Install every currently supported family except uv.
+curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
+  | bash -s -- --disable-rule uv
+
+# Exact rule selection for automation.
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
   | bash -s -- --rules rg,uv
 ```
@@ -340,9 +370,12 @@ codex_hooks = true
 
 ## Quick Start
 
-### 1. Inspect the installer
+### 1. Inspect the installer and rule catalog
 
 ```sh
+curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
+  | bash -s -- --list-rules
+
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
   | bash -s -- --dry-run
 ```
@@ -356,11 +389,19 @@ curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preference
 
 # Only rg
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
-  | bash -s -- --only-rg
+  | bash -s -- --enable-rule rg
 
 # Only uv
 curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
-  | bash -s -- --only-uv
+  | bash -s -- --enable-rule uv
+
+# Everything except uv
+curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
+  | bash -s -- --disable-rule uv
+
+# Exact set for automation
+curl -fsSL https://raw.githubusercontent.com/maksymsherman/force_tool_preferences/main/install.sh \
+  | bash -s -- --rules rg,uv
 ```
 
 ### 3. Restart any running agent sessions
@@ -433,9 +474,9 @@ enforce-tool-preferences-command \
   --rules rg,uv
 ```
 
-### `--rules rg|uv|rg,uv`
+### `--rules <rule[,rule...]>`
 
-Restrict which rule families are active for this invocation or configured hook.
+Restrict which rule families are active for this invocation or configured hook. This is the same exact-set model the installer uses for automation.
 
 ```sh
 enforce-tool-preferences-command --command 'grep -rn TODO .' --rules rg
@@ -742,7 +783,7 @@ No. It blocks and prints the exact rewrite or likely alternatives. That keeps th
 
 ### Can I enable only one rule family?
 
-Yes. Use `--only-rg`, `--only-uv`, or explicit `--rules rg`, `--rules uv`, or `--rules rg,uv`.
+Yes. The preferred installer form is `--enable-rule rg` or `--enable-rule uv`. For automation or manual hook configuration, use `--rules rg` or `--rules uv`. The older `--only-rg` and `--only-uv` aliases still work, but they are kept only for compatibility.
 
 ### Why does `pip install requests` return two answers?
 

@@ -4,11 +4,15 @@ set -euo pipefail
 REPO="https://github.com/maksymsherman/force_tool_preferences.git"
 INSTALL_DIR="${HOME}/.local/bin"
 BINARY_NAME="enforce-tool-preferences-command"
+SUPPORTED_RULES=(rg uv)
 CHECK_BINARY_HASH=0
 OVERWRITE_BINARY=0
 DRY_RUN=0
-RULES="rg,uv"
-RULE_SELECTION_EXPLICIT=0
+LIST_RULES=0
+RULES=""
+EXACT_RULES=""
+ENABLE_RULES=()
+DISABLE_RULES=()
 
 info()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 ok()    { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
@@ -17,7 +21,7 @@ err()   { printf '\033[1;31m==>\033[0m %s\n' "$*" >&2; }
 
 usage() {
   cat <<'EOF'
-Usage: install.sh [--check-binary-hash] [--overwrite-binary] [--dry-run] [--rules rg,uv|rg|uv] [--only-rg] [--only-uv] [--help]
+Usage: install.sh [--check-binary-hash] [--overwrite-binary] [--dry-run] [--list-rules] [--rules <rule[,rule...]>] [--enable-rule <name>] [--disable-rule <name>] [--help]
 
 Options:
   --check-binary-hash  Print the SHA-256 hashes for the built and installed binary.
@@ -25,26 +29,26 @@ Options:
                        even when the hashes already match.
   --dry-run            Print the exact repo files, paths, and planned actions without
                        cloning, building, or writing anything.
-  --rules              Enable a comma-separated subset of rule families.
-                       Supported values: rg, uv, rg,uv.
-  --only-rg            Enable only grep-family -> rg enforcement.
-  --only-uv            Enable only python/pip-family -> uv enforcement.
+  --list-rules         Show the supported rule families, aliases, and prerequisites.
+  --rules              Set the exact enabled rule family list. Best for automation,
+                       CI, and dotfiles that want a stable explicit selection.
+  --enable-rule        Add one rule family by name. Repeat to build an exact subset.
+                       If omitted, installation starts from all supported rules.
+  --disable-rule       Remove one rule family by name. Repeat to subtract from the
+                       default all-rules install or from a prior --enable-rule set.
+  --only-rg            Compatibility alias for --rules rg.
+  --only-uv            Compatibility alias for --rules uv.
   --help, -h           Show this help text.
 EOF
 }
 
-normalize_rules() {
-  local value="${1// /}"
-
-  case "$value" in
+canonicalize_rule_name() {
+  case "${1// /}" in
     rg|ripgrep)
       printf 'rg\n'
       ;;
     uv)
       printf 'uv\n'
-      ;;
-    rg,uv|uv,rg|ripgrep,uv|uv,ripgrep)
-      printf 'rg,uv\n'
       ;;
     *)
       return 1
@@ -52,28 +56,67 @@ normalize_rules() {
   esac
 }
 
-set_rules() {
-  local normalized
-
-  if ! normalized="$(normalize_rules "$1")"; then
-    err "invalid rule selection: $1"
-    err "expected rg, uv, or rg,uv"
-    exit 1
-  fi
-
-  if [ "$RULE_SELECTION_EXPLICIT" -eq 1 ] && [ "$RULES" != "$normalized" ]; then
-    err "multiple conflicting rule-selection flags provided"
-    exit 1
-  fi
-
-  RULES="$normalized"
-  RULE_SELECTION_EXPLICIT=1
+rule_description() {
+  case "$1" in
+    rg)
+      printf 'grep-family -> rg enforcement\n'
+      ;;
+    uv)
+      printf 'python/pip-family -> uv enforcement\n'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
-rule_enabled() {
-  local rule="$1"
+rule_prerequisites() {
+  case "$1" in
+    rg)
+      printf 'cargo, rg\n'
+      ;;
+    uv)
+      printf 'cargo, uv\n'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
 
-  case ",$RULES," in
+rule_aliases() {
+  case "$1" in
+    rg)
+      printf 'ripgrep\n'
+      ;;
+    uv)
+      printf '<none>\n'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+supported_rules_display() {
+  local output=""
+  local rule
+
+  for rule in "${SUPPORTED_RULES[@]}"; do
+    if [ -n "$output" ]; then
+      output="$output, "
+    fi
+    output="$output$rule"
+  done
+
+  printf '%s\n' "$output"
+}
+
+csv_contains_rule() {
+  local csv="$1"
+  local rule="$2"
+
+  case ",$csv," in
     *",$rule,"*)
       return 0
       ;;
@@ -81,6 +124,176 @@ rule_enabled() {
       return 1
       ;;
   esac
+}
+
+csv_add_rule() {
+  local csv="$1"
+  local rule="$2"
+
+  if [ -z "$csv" ]; then
+    printf '%s\n' "$rule"
+    return
+  fi
+
+  if csv_contains_rule "$csv" "$rule"; then
+    printf '%s\n' "$csv"
+    return
+  fi
+
+  printf '%s,%s\n' "$csv" "$rule"
+}
+
+csv_remove_rule() {
+  local csv="$1"
+  local rule="$2"
+  local output=""
+  local item
+  local items=()
+
+  IFS=',' read -r -a items <<< "$csv"
+
+  for item in "${items[@]}"; do
+    [ "$item" = "$rule" ] && continue
+    output="$(csv_add_rule "$output" "$item")"
+  done
+
+  printf '%s\n' "$output"
+}
+
+supported_rules_csv() {
+  local output=""
+  local rule
+
+  for rule in "${SUPPORTED_RULES[@]}"; do
+    output="$(csv_add_rule "$output" "$rule")"
+  done
+
+  printf '%s\n' "$output"
+}
+
+normalize_rules_csv() {
+  local normalized
+  local output=""
+  local item
+  local items=()
+
+  IFS=',' read -r -a items <<< "$1"
+
+  for item in "${items[@]}"; do
+    [ -z "${item// /}" ] && continue
+
+    if ! normalized="$(canonicalize_rule_name "$item")"; then
+      return 1
+    fi
+
+    output="$(csv_add_rule "$output" "$normalized")"
+  done
+
+  if [ -z "$output" ]; then
+    return 1
+  fi
+
+  printf '%s\n' "$output"
+}
+
+set_exact_rules() {
+  local normalized
+
+  if [ "${#ENABLE_RULES[@]}" -gt 0 ] || [ "${#DISABLE_RULES[@]}" -gt 0 ]; then
+    err "cannot combine --rules with --enable-rule or --disable-rule"
+    exit 1
+  fi
+
+  if ! normalized="$(normalize_rules_csv "$1")"; then
+    err "invalid rule selection: $1"
+    err "supported rule ids: $(supported_rules_display)"
+    exit 1
+  fi
+
+  if [ -n "$EXACT_RULES" ] && [ "$EXACT_RULES" != "$normalized" ]; then
+    err "multiple conflicting rule-selection flags provided"
+    exit 1
+  fi
+
+  EXACT_RULES="$normalized"
+}
+
+append_rule_selection() {
+  local mode="$1"
+  local value="$2"
+  local normalized
+
+  if [ -n "$EXACT_RULES" ]; then
+    err "cannot combine --rules with --${mode}-rule"
+    exit 1
+  fi
+
+  if ! normalized="$(canonicalize_rule_name "$value")"; then
+    err "unknown rule '$value'"
+    err "supported rule ids: $(supported_rules_display)"
+    exit 1
+  fi
+
+  if [ "$mode" = "enable" ]; then
+    ENABLE_RULES+=("$normalized")
+    return
+  fi
+
+  if [ "$mode" = "disable" ]; then
+    DISABLE_RULES+=("$normalized")
+    return
+  fi
+
+  err "internal installer error: unknown rule-selection mode '$mode'"
+  exit 1
+}
+
+resolve_rules() {
+  local selected=""
+  local rule
+
+  if [ -n "$EXACT_RULES" ]; then
+    RULES="$EXACT_RULES"
+    return
+  fi
+
+  if [ "${#ENABLE_RULES[@]}" -gt 0 ]; then
+    for rule in "${ENABLE_RULES[@]}"; do
+      selected="$(csv_add_rule "$selected" "$rule")"
+    done
+  else
+    selected="$(supported_rules_csv)"
+  fi
+
+  for rule in "${DISABLE_RULES[@]}"; do
+    selected="$(csv_remove_rule "$selected" "$rule")"
+  done
+
+  if [ -z "$selected" ]; then
+    err "rule selection resolved to an empty set"
+    err "enable at least one rule family from: $(supported_rules_display)"
+    exit 1
+  fi
+
+  RULES="$selected"
+}
+
+list_rules() {
+  local rule
+
+  echo "Supported rule families:"
+  for rule in "${SUPPORTED_RULES[@]}"; do
+    echo "  $rule"
+    echo "    Description: $(rule_description "$rule")"
+    echo "    Aliases: $(rule_aliases "$rule")"
+    echo "    Requires: $(rule_prerequisites "$rule")"
+  done
+}
+
+rule_enabled() {
+  local rule="$1"
+
+  csv_contains_rule "$RULES" "$rule"
 }
 
 hash_file() {
@@ -206,20 +419,43 @@ while [ "$#" -gt 0 ]; do
     --dry-run)
       DRY_RUN=1
       ;;
+    --list-rules)
+      LIST_RULES=1
+      ;;
     --rules)
       if [ "$#" -lt 2 ]; then
         err "missing value for --rules"
         usage
         exit 1
       fi
-      set_rules "$2"
+      set_exact_rules "$2"
+      shift
+      ;;
+    --enable-rule)
+      if [ "$#" -lt 2 ]; then
+        err "missing value for --enable-rule"
+        usage
+        exit 1
+      fi
+      append_rule_selection "enable" "$2"
+      shift
+      ;;
+    --disable-rule)
+      if [ "$#" -lt 2 ]; then
+        err "missing value for --disable-rule"
+        usage
+        exit 1
+      fi
+      append_rule_selection "disable" "$2"
       shift
       ;;
     --only-rg)
-      set_rules "rg"
+      warn "--only-rg is deprecated; prefer --enable-rule rg or --rules rg"
+      set_exact_rules "rg"
       ;;
     --only-uv)
-      set_rules "uv"
+      warn "--only-uv is deprecated; prefer --enable-rule uv or --rules uv"
+      set_exact_rules "uv"
       ;;
     --help|-h)
       usage
@@ -233,6 +469,13 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+
+if [ "$LIST_RULES" -eq 1 ]; then
+  list_rules
+  exit 0
+fi
+
+resolve_rules
 
 if [ "$DRY_RUN" -eq 1 ] && [ "$CHECK_BINARY_HASH" -eq 1 ]; then
   warn "--check-binary-hash is ignored during --dry-run because the build step is skipped."

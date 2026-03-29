@@ -19,22 +19,26 @@ enum RuleId {
     Uv = 1,
 }
 
+const RIPGREP_ALIASES: &[&str] = &["ripgrep"];
+const UV_ALIASES: &[&str] = &[];
+const RULE_IDS: [RuleId; 2] = [RuleId::Ripgrep, RuleId::Uv];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RuleSpec {
-    name: &'static str,
-    preferred_tool: &'static str,
+    cli_name: &'static str,
+    aliases: &'static [&'static str],
     guidance: &'static str,
 }
 
 const RULE_SPECS: [RuleSpec; 2] = [
     RuleSpec {
-        name: "grep-family",
-        preferred_tool: "rg",
+        cli_name: "rg",
+        aliases: RIPGREP_ALIASES,
         guidance: GREP_MESSAGE,
     },
     RuleSpec {
-        name: "python-family",
-        preferred_tool: "uv",
+        cli_name: "uv",
+        aliases: UV_ALIASES,
         guidance: PYTHON_MESSAGE,
     },
 ];
@@ -44,12 +48,12 @@ fn rule_spec(rule: RuleId) -> &'static RuleSpec {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct RuleSet(u8);
+struct RuleSet(u32);
 
 impl RuleSet {
-    const RIPGREP: u8 = 1 << 0;
-    const UV: u8 = 1 << 1;
-    const ALL: u8 = Self::RIPGREP | Self::UV;
+    const RIPGREP: u32 = 1 << 0;
+    const UV: u32 = 1 << 1;
+    const ALL: u32 = Self::RIPGREP | Self::UV;
 
     fn all() -> Self {
         Self(Self::ALL)
@@ -65,7 +69,7 @@ impl RuleSet {
     }
 
     fn parse(value: &str) -> Result<Self, String> {
-        let mut mask = 0u8;
+        let mut mask = 0u32;
 
         for item in value.split(',') {
             let name = item.trim();
@@ -73,39 +77,59 @@ impl RuleSet {
                 continue;
             }
 
-            match name {
-                "rg" | "ripgrep" => mask |= Self::RIPGREP,
-                "uv" => mask |= Self::UV,
-                _ => {
-                    return Err(format!(
-                    "unknown rule set '{name}'. Expected a comma-separated list using rg and/or uv"
-                ))
-                }
-            }
+            let Some(rule) = rule_id_for_cli_name(name) else {
+                return Err(format!(
+                    "unknown rule '{name}'. Expected --rules <rule[,rule...]> using supported rule ids: {}",
+                    supported_rule_names()
+                ));
+            };
+
+            mask |= rule_mask(rule);
         }
 
         if mask == 0 {
-            return Err("at least one rule must be enabled; use rg, uv, or rg,uv".to_string());
+            return Err(format!(
+                "at least one rule must be enabled; use --rules <rule[,rule...]> with one or more of: {}",
+                supported_rule_names()
+            ));
         }
 
         Ok(Self(mask))
     }
 
-    fn cli_value(self) -> &'static str {
-        match self.0 {
-            Self::RIPGREP => "rg",
-            Self::UV => "uv",
-            Self::ALL => "rg,uv",
-            _ => "rg,uv",
+    fn cli_value(self) -> String {
+        let mut names = Vec::new();
+
+        for rule in RULE_IDS {
+            if self.contains(rule) {
+                names.push(rule_spec(rule).cli_name);
+            }
         }
+
+        names.join(",")
     }
 }
 
-fn rule_mask(rule: RuleId) -> u8 {
+fn rule_mask(rule: RuleId) -> u32 {
     match rule {
         RuleId::Ripgrep => RuleSet::RIPGREP,
         RuleId::Uv => RuleSet::UV,
     }
+}
+
+fn rule_id_for_cli_name(name: &str) -> Option<RuleId> {
+    RULE_IDS.iter().copied().find(|rule| {
+        let spec = rule_spec(*rule);
+        spec.cli_name == name || spec.aliases.iter().any(|alias| *alias == name)
+    })
+}
+
+fn supported_rule_names() -> String {
+    RULE_IDS
+        .iter()
+        .map(|rule| rule_spec(*rule).cli_name)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -419,9 +443,13 @@ impl Config {
 }
 
 fn print_usage() {
+    let rule_csv_example = RuleSet::all().cli_value();
+
     println!(
-        "Usage:\n  {0} --command \"grep -rn pattern .\" [--claude-json] [--rules rg,uv]\n  {0} --stdin-command [--claude-json] [--rules rg,uv]\n  {0} --claude-hook-json [--rules rg,uv]\n  {0} --codex-hook-json [--rules rg,uv]\n  {0} --gemini-hook-json [--rules rg,uv]\n  {0} --benchmark-command \"grep -rn pattern .\" [--iterations 1000000] [--rules rg,uv]\n  {0} --configure-claude-hook <settings-path> <binary-name> [--rules rg,uv]\n  {0} --configure-gemini-hook <settings-path> <binary-name> [--rules rg,uv]\n  {0} --configure-codex-hook <hooks-path> <binary-name> [--rules rg,uv]",
-        BINARY_NAME
+        "Usage:\n  {0} --command \"grep -rn pattern .\" [--claude-json] [--rules <rule[,rule...]>]\n  {0} --stdin-command [--claude-json] [--rules <rule[,rule...]>]\n  {0} --claude-hook-json [--rules <rule[,rule...]>]\n  {0} --codex-hook-json [--rules <rule[,rule...]>]\n  {0} --gemini-hook-json [--rules <rule[,rule...]>]\n  {0} --benchmark-command \"grep -rn pattern .\" [--iterations 1000000] [--rules <rule[,rule...]>]\n  {0} --configure-claude-hook <settings-path> <binary-name> [--rules <rule[,rule...]>]\n  {0} --configure-gemini-hook <settings-path> <binary-name> [--rules <rule[,rule...]>]\n  {0} --configure-codex-hook <hooks-path> <binary-name> [--rules <rule[,rule...]>]\n\nSupported rule ids: {1}\nExample exact set: --rules {2}",
+        BINARY_NAME,
+        supported_rule_names(),
+        rule_csv_example,
     );
 }
 
