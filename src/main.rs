@@ -13,6 +13,7 @@ const BINARY_NAME: &str = "enforce-tool-preferences-command";
 const GREP_MESSAGE: &str = "Use rg (ripgrep) instead of grep in this project. Replace blocked grep commands with the least invasive exact rg rewrite when the flag mapping is clear. If a flag does not have a guaranteed direct rg translation, translate it manually instead of guessing.";
 const PYTHON_MESSAGE: &str = "Use uv instead of bare Python or pip commands in this project. Replace the blocked command with 'uv run ...', 'uv add ...', 'uv add --dev ...', 'uv remove ...', or 'uv run --with ...' as appropriate.";
 const UV_INIT_MESSAGE: &str = "Do not run 'uv init' in an existing project unless the user explicitly asks for project creation or conversion. Inspect the repo first and prefer 'uv run', 'uv add', 'uv sync', or 'uv run --with'. If project initialization is truly needed, use 'uv init --no-readme --no-workspace' to avoid overwriting existing files and git history.";
+const BUN_MESSAGE: &str = "Use bun instead of npm or npx in this project. Replace blocked commands with 'bun install', 'bun add', 'bun remove', 'bun run', 'bunx', 'bun create', 'bun publish', 'bun update', or 'bun outdated' when the mapping is exact. If an npm or npx flag does not have a guaranteed Bun equivalent, translate it manually instead of guessing.";
 const INSTALL_SH_SOURCE: &str = include_str!("../install.sh");
 const SHARED_RULE_CATALOG_BEGIN: &str = "# BEGIN_SHARED_RULE_CATALOG";
 const SHARED_RULE_CATALOG_END: &str = "# END_SHARED_RULE_CATALOG";
@@ -21,9 +22,10 @@ const SHARED_RULE_CATALOG_END: &str = "# END_SHARED_RULE_CATALOG";
 enum RuleId {
     Ripgrep = 0,
     Uv = 1,
+    Bun = 2,
 }
 
-const RULE_IDS: [RuleId; 2] = [RuleId::Ripgrep, RuleId::Uv];
+const RULE_IDS: [RuleId; 3] = [RuleId::Ripgrep, RuleId::Uv, RuleId::Bun];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RuleSpec {
@@ -31,7 +33,7 @@ struct RuleSpec {
     guidance: &'static str,
 }
 
-const RULE_SPECS: [RuleSpec; 2] = [
+const RULE_SPECS: [RuleSpec; 3] = [
     RuleSpec {
         manifest_id: "rg",
         guidance: GREP_MESSAGE,
@@ -39,6 +41,10 @@ const RULE_SPECS: [RuleSpec; 2] = [
     RuleSpec {
         manifest_id: "uv",
         guidance: PYTHON_MESSAGE,
+    },
+    RuleSpec {
+        manifest_id: "bun",
+        guidance: BUN_MESSAGE,
     },
 ];
 
@@ -60,7 +66,8 @@ struct RuleSet(u32);
 impl RuleSet {
     const RIPGREP: u32 = 1 << 0;
     const UV: u32 = 1 << 1;
-    const ALL: u32 = Self::RIPGREP | Self::UV;
+    const BUN: u32 = 1 << 2;
+    const ALL: u32 = Self::RIPGREP | Self::UV | Self::BUN;
 
     fn all() -> Self {
         Self(Self::ALL)
@@ -121,6 +128,7 @@ fn rule_mask(rule: RuleId) -> u32 {
     match rule {
         RuleId::Ripgrep => RuleSet::RIPGREP,
         RuleId::Uv => RuleSet::UV,
+        RuleId::Bun => RuleSet::BUN,
     }
 }
 
@@ -836,7 +844,10 @@ fn evaluate_segment(tokens: &[ParsedToken<'_>], rules: RuleSet) -> Option<BlockD
             TokenKind::Wrapper(kind) => {
                 wrapper = Some(kind);
             }
-            TokenKind::Allowed(AllowedCommand::Rg) | TokenKind::Allowed(AllowedCommand::Uvx) => {
+            TokenKind::Allowed(AllowedCommand::Rg)
+            | TokenKind::Allowed(AllowedCommand::Uvx)
+            | TokenKind::Allowed(AllowedCommand::Bun)
+            | TokenKind::Allowed(AllowedCommand::Bunx) => {
                 return None;
             }
             TokenKind::Allowed(AllowedCommand::Uv) => {
@@ -863,6 +874,18 @@ fn evaluate_segment(tokens: &[ParsedToken<'_>], rules: RuleSet) -> Option<BlockD
                 }
                 return Some(build_pip_decision(tokens, index));
             }
+            TokenKind::Blocked(BlockedCommand::Npm) => {
+                if !rules.contains(RuleId::Bun) {
+                    return None;
+                }
+                return Some(build_npm_decision(tokens, index));
+            }
+            TokenKind::Blocked(BlockedCommand::Npx) => {
+                if !rules.contains(RuleId::Bun) {
+                    return None;
+                }
+                return Some(build_npx_decision(tokens, index));
+            }
             TokenKind::Other => return None,
         }
     }
@@ -880,6 +903,22 @@ fn build_python_decision(tokens: &[ParsedToken<'_>], command_index: usize) -> Bl
 
 fn build_pip_decision(tokens: &[ParsedToken<'_>], command_index: usize) -> BlockDecision {
     BlockDecision::new(render_pip_decision(tokens, command_index))
+}
+
+fn build_npm_decision(tokens: &[ParsedToken<'_>], command_index: usize) -> BlockDecision {
+    BlockDecision::new(render_npm_decision(tokens, command_index))
+}
+
+fn build_npx_decision(tokens: &[ParsedToken<'_>], command_index: usize) -> BlockDecision {
+    match rewrite_npx_to_bunx(tokens, command_index) {
+        BunRewrite::Exact(suggestion) => BlockDecision::new(into_exact_suggestion_message(
+            rule_spec(RuleId::Bun).guidance,
+            suggestion,
+        )),
+        BunRewrite::NeedsManualTranslation { items, note } => BlockDecision::new(
+            format_bun_manual_translation_message(rule_spec(RuleId::Bun).guidance, &items, note),
+        ),
+    }
 }
 
 fn evaluate_uv_command(tokens: &[ParsedToken<'_>], command_index: usize) -> Option<BlockDecision> {
@@ -980,6 +1019,581 @@ fn render_pip_uninstall_decision(
         "Use `uv remove ...` only when you intentionally want to update project dependencies.",
     );
     message
+}
+
+fn render_npm_decision(tokens: &[ParsedToken<'_>], command_index: usize) -> String {
+    let Some(subcommand_token) = tokens.get(command_index + 1) else {
+        return format_bun_manual_translation_message(
+            rule_spec(RuleId::Bun).guidance,
+            &[],
+            "Choose the Bun subcommand manually after checking `bun --help` instead of guessing.",
+        );
+    };
+
+    let subcommand = subcommand_token.value.as_ref();
+    if subcommand.starts_with('-') {
+        return format_bun_manual_translation_message(
+            rule_spec(RuleId::Bun).guidance,
+            &[subcommand_token.raw.to_string()],
+            "Translate npm flags manually after checking Bun's CLI docs instead of assuming they map one-to-one.",
+        );
+    }
+
+    if subcommand.eq_ignore_ascii_case("install") || subcommand.eq_ignore_ascii_case("i") {
+        return match rewrite_npm_install_to_bun(tokens, command_index) {
+            BunRewrite::Exact(suggestion) => {
+                into_exact_suggestion_message(rule_spec(RuleId::Bun).guidance, suggestion)
+            }
+            BunRewrite::NeedsManualTranslation { items, note } => {
+                format_bun_manual_translation_message(rule_spec(RuleId::Bun).guidance, &items, note)
+            }
+        };
+    }
+
+    if matches_npm_remove_subcommand(subcommand) {
+        return match rewrite_npm_remove_to_bun(tokens, command_index) {
+            BunRewrite::Exact(suggestion) => {
+                into_exact_suggestion_message(rule_spec(RuleId::Bun).guidance, suggestion)
+            }
+            BunRewrite::NeedsManualTranslation { items, note } => {
+                format_bun_manual_translation_message(rule_spec(RuleId::Bun).guidance, &items, note)
+            }
+        };
+    }
+
+    if subcommand.eq_ignore_ascii_case("run") || subcommand.eq_ignore_ascii_case("run-script") {
+        return match rewrite_npm_run_to_bun(tokens, command_index) {
+            BunRewrite::Exact(suggestion) => {
+                into_exact_suggestion_message(rule_spec(RuleId::Bun).guidance, suggestion)
+            }
+            BunRewrite::NeedsManualTranslation { items, note } => {
+                format_bun_manual_translation_message(rule_spec(RuleId::Bun).guidance, &items, note)
+            }
+        };
+    }
+
+    if subcommand.eq_ignore_ascii_case("exec") {
+        return match rewrite_npm_exec_to_bun(tokens, command_index) {
+            BunRewrite::Exact(suggestion) => {
+                into_exact_suggestion_message(rule_spec(RuleId::Bun).guidance, suggestion)
+            }
+            BunRewrite::NeedsManualTranslation { items, note } => {
+                format_bun_manual_translation_message(rule_spec(RuleId::Bun).guidance, &items, note)
+            }
+        };
+    }
+
+    if subcommand.eq_ignore_ascii_case("create") {
+        return match rewrite_npm_create_to_bun(tokens, command_index) {
+            BunRewrite::Exact(suggestion) => {
+                into_exact_suggestion_message(rule_spec(RuleId::Bun).guidance, suggestion)
+            }
+            BunRewrite::NeedsManualTranslation { items, note } => {
+                format_bun_manual_translation_message(rule_spec(RuleId::Bun).guidance, &items, note)
+            }
+        };
+    }
+
+    if subcommand.eq_ignore_ascii_case("publish") {
+        return match rewrite_npm_publish_to_bun(tokens, command_index) {
+            BunRewrite::Exact(suggestion) => {
+                into_exact_suggestion_message(rule_spec(RuleId::Bun).guidance, suggestion)
+            }
+            BunRewrite::NeedsManualTranslation { items, note } => {
+                format_bun_manual_translation_message(rule_spec(RuleId::Bun).guidance, &items, note)
+            }
+        };
+    }
+
+    if subcommand.eq_ignore_ascii_case("update") || subcommand.eq_ignore_ascii_case("upgrade") {
+        return match rewrite_npm_update_to_bun(tokens, command_index) {
+            BunRewrite::Exact(suggestion) => {
+                into_exact_suggestion_message(rule_spec(RuleId::Bun).guidance, suggestion)
+            }
+            BunRewrite::NeedsManualTranslation { items, note } => {
+                format_bun_manual_translation_message(rule_spec(RuleId::Bun).guidance, &items, note)
+            }
+        };
+    }
+
+    if subcommand.eq_ignore_ascii_case("outdated") {
+        return match rewrite_npm_outdated_to_bun(tokens, command_index) {
+            BunRewrite::Exact(suggestion) => {
+                into_exact_suggestion_message(rule_spec(RuleId::Bun).guidance, suggestion)
+            }
+            BunRewrite::NeedsManualTranslation { items, note } => {
+                format_bun_manual_translation_message(rule_spec(RuleId::Bun).guidance, &items, note)
+            }
+        };
+    }
+
+    if subcommand.eq_ignore_ascii_case("pack") {
+        return match rewrite_npm_pack_to_bun(tokens, command_index) {
+            BunRewrite::Exact(suggestion) => {
+                into_exact_suggestion_message(rule_spec(RuleId::Bun).guidance, suggestion)
+            }
+            BunRewrite::NeedsManualTranslation { items, note } => {
+                format_bun_manual_translation_message(rule_spec(RuleId::Bun).guidance, &items, note)
+            }
+        };
+    }
+
+    format_bun_manual_translation_message(
+        rule_spec(RuleId::Bun).guidance,
+        &[format!("subcommand: {}", subcommand_token.raw)],
+        "Translate this npm workflow manually after checking Bun's docs instead of assuming the CLIs behave the same.",
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NpmInstallMode {
+    Default,
+    Dev,
+    Optional,
+    Peer,
+}
+
+enum BunRewrite {
+    Exact(String),
+    NeedsManualTranslation {
+        items: Vec<String>,
+        note: &'static str,
+    },
+}
+
+fn matches_npm_remove_subcommand(subcommand: &str) -> bool {
+    matches!(
+        subcommand,
+        value
+            if value.eq_ignore_ascii_case("uninstall")
+                || value.eq_ignore_ascii_case("remove")
+                || value.eq_ignore_ascii_case("rm")
+                || value.eq_ignore_ascii_case("r")
+                || value.eq_ignore_ascii_case("un")
+    )
+}
+
+fn rewrite_npx_to_bunx(tokens: &[ParsedToken<'_>], command_index: usize) -> BunRewrite {
+    let args = &tokens[command_index + 1..];
+    let mut saw_target = false;
+    let mut uncertain_items = Vec::new();
+
+    for token in args {
+        let value = token.value.as_ref();
+        if saw_target {
+            continue;
+        }
+
+        if value.starts_with('-') || value == "--" {
+            uncertain_items.push(token.raw.to_string());
+            continue;
+        }
+
+        saw_target = true;
+    }
+
+    if !uncertain_items.is_empty() {
+        return BunRewrite::NeedsManualTranslation {
+            items: uncertain_items,
+            note: "Translate npx-only flags manually after checking `bunx --help` instead of assuming they map directly.",
+        };
+    }
+
+    if !saw_target {
+        return BunRewrite::NeedsManualTranslation {
+            items: Vec::new(),
+            note: "Provide the Bun package or executable manually after checking `bunx --help`.",
+        };
+    }
+
+    BunRewrite::Exact(replace_command(tokens, command_index, 1, &["bunx"]))
+}
+
+fn rewrite_npm_install_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) -> BunRewrite {
+    let args = &tokens[command_index + 2..];
+    let mut install_mode = NpmInstallMode::Default;
+    let mut has_mode_flag = false;
+    let mut exact = false;
+    let mut global = false;
+    let mut package_args = Vec::new();
+    let mut passthrough_flags = Vec::new();
+    let mut uncertain_items = Vec::new();
+
+    for token in args {
+        let value = token.value.as_ref();
+        if value.starts_with('-') {
+            match value {
+                "-D" | "--save-dev" => {
+                    if has_mode_flag && install_mode != NpmInstallMode::Dev {
+                        uncertain_items.push(token.raw.to_string());
+                    } else {
+                        install_mode = NpmInstallMode::Dev;
+                        has_mode_flag = true;
+                    }
+                }
+                "-O" | "--save-optional" => {
+                    if has_mode_flag && install_mode != NpmInstallMode::Optional {
+                        uncertain_items.push(token.raw.to_string());
+                    } else {
+                        install_mode = NpmInstallMode::Optional;
+                        has_mode_flag = true;
+                    }
+                }
+                "--save-peer" => {
+                    if has_mode_flag && install_mode != NpmInstallMode::Peer {
+                        uncertain_items.push(token.raw.to_string());
+                    } else {
+                        install_mode = NpmInstallMode::Peer;
+                        has_mode_flag = true;
+                    }
+                }
+                "-E" | "--save-exact" => {
+                    exact = true;
+                }
+                "-g" | "--global" => {
+                    global = true;
+                }
+                "-S" | "--save" | "--save-prod" => {}
+                "--production" | "--frozen-lockfile" | "--dry-run" => {
+                    passthrough_flags.push(token.raw.to_string());
+                }
+                _ => uncertain_items.push(token.raw.to_string()),
+            }
+            continue;
+        }
+
+        package_args.push(token.raw);
+    }
+
+    if !uncertain_items.is_empty() {
+        return BunRewrite::NeedsManualTranslation {
+            items: uncertain_items,
+            note: "Translate npm install flags manually after checking Bun's package-manager docs instead of guessing.",
+        };
+    }
+
+    if package_args.is_empty() {
+        if global || install_mode != NpmInstallMode::Default || exact {
+            let mut items = Vec::new();
+            if global {
+                items.push("--global without package arguments".to_string());
+            }
+            if install_mode != NpmInstallMode::Default {
+                items.push("dependency save-mode flag without package arguments".to_string());
+            }
+            if exact {
+                items.push("--save-exact without package arguments".to_string());
+            }
+            return BunRewrite::NeedsManualTranslation {
+                items,
+                note: "Choose the Bun install form manually after checking whether you mean to add packages or install the existing lockfile.",
+            };
+        }
+
+        return BunRewrite::Exact(replace_command(
+            tokens,
+            command_index,
+            2,
+            &["bun", "install"],
+        ));
+    }
+
+    if global {
+        if install_mode != NpmInstallMode::Default || exact {
+            let mut items = Vec::new();
+            if install_mode != NpmInstallMode::Default {
+                items.push("dependency save-mode flag combined with --global".to_string());
+            }
+            if exact {
+                items.push("--save-exact combined with --global".to_string());
+            }
+            return BunRewrite::NeedsManualTranslation {
+                items,
+                note: "Translate this global install manually after checking Bun's global install docs instead of assuming package metadata flags still apply.",
+            };
+        }
+
+        return BunRewrite::Exact(replace_command(
+            tokens,
+            command_index,
+            2,
+            &["bun", "install"],
+        ));
+    }
+
+    let mut suggestion = String::new();
+    let mut needs_space = false;
+    for token in &tokens[..command_index] {
+        push_command_part(&mut suggestion, token.raw, &mut needs_space);
+    }
+    push_command_part(&mut suggestion, "bun", &mut needs_space);
+    push_command_part(&mut suggestion, "add", &mut needs_space);
+
+    match install_mode {
+        NpmInstallMode::Default => {}
+        NpmInstallMode::Dev => push_command_part(&mut suggestion, "-d", &mut needs_space),
+        NpmInstallMode::Optional => {
+            push_command_part(&mut suggestion, "--optional", &mut needs_space)
+        }
+        NpmInstallMode::Peer => push_command_part(&mut suggestion, "--peer", &mut needs_space),
+    }
+
+    if exact {
+        push_command_part(&mut suggestion, "-E", &mut needs_space);
+    }
+
+    for token in package_args {
+        push_command_part(&mut suggestion, token, &mut needs_space);
+    }
+
+    BunRewrite::Exact(suggestion)
+}
+
+fn rewrite_npm_remove_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) -> BunRewrite {
+    let args = &tokens[command_index + 2..];
+    let mut package_count = 0usize;
+    let mut uncertain_items = Vec::new();
+
+    for token in args {
+        let value = token.value.as_ref();
+        if value.starts_with('-') {
+            if !matches!(value, "-g" | "--global") {
+                uncertain_items.push(token.raw.to_string());
+            }
+            continue;
+        }
+
+        package_count += 1;
+    }
+
+    if !uncertain_items.is_empty() {
+        return BunRewrite::NeedsManualTranslation {
+            items: uncertain_items,
+            note: "Translate npm remove flags manually after checking Bun's remove docs instead of guessing.",
+        };
+    }
+
+    if package_count == 0 {
+        return BunRewrite::NeedsManualTranslation {
+            items: Vec::new(),
+            note: "Choose the Bun remove target manually instead of running a package-removal command without arguments.",
+        };
+    }
+
+    BunRewrite::Exact(replace_command(
+        tokens,
+        command_index,
+        2,
+        &["bun", "remove"],
+    ))
+}
+
+fn rewrite_npm_run_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) -> BunRewrite {
+    let args = &tokens[command_index + 2..];
+    let mut saw_script = false;
+    let mut uncertain_items = Vec::new();
+
+    for token in args {
+        let value = token.value.as_ref();
+        if saw_script {
+            continue;
+        }
+
+        if value == "--" || value.starts_with('-') {
+            uncertain_items.push(token.raw.to_string());
+            continue;
+        }
+
+        saw_script = true;
+    }
+
+    if !uncertain_items.is_empty() {
+        return BunRewrite::NeedsManualTranslation {
+            items: uncertain_items,
+            note: "Translate npm run flags manually after checking Bun's script runner docs instead of assuming the same CLI shape.",
+        };
+    }
+
+    BunRewrite::Exact(replace_command(tokens, command_index, 2, &["bun", "run"]))
+}
+
+fn rewrite_npm_exec_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) -> BunRewrite {
+    let args = &tokens[command_index + 2..];
+    let mut target = None::<&str>;
+    let mut uncertain_items = Vec::new();
+
+    for token in args {
+        let value = token.value.as_ref();
+        if target.is_some() {
+            continue;
+        }
+
+        if value == "--" || value.starts_with('-') {
+            uncertain_items.push(token.raw.to_string());
+            continue;
+        }
+
+        if !is_simple_bun_exec_target(value) {
+            uncertain_items.push(token.raw.to_string());
+            continue;
+        }
+
+        target = Some(token.raw);
+    }
+
+    if !uncertain_items.is_empty() {
+        return BunRewrite::NeedsManualTranslation {
+            items: uncertain_items,
+            note: "Translate npm exec options manually after checking whether the Bun equivalent should be `bun` or `bunx`.",
+        };
+    }
+
+    if target.is_none() {
+        return BunRewrite::NeedsManualTranslation {
+            items: Vec::new(),
+            note: "Choose the Bun executable manually after checking whether you mean a local binary, package script, or one-off package execution.",
+        };
+    }
+
+    BunRewrite::Exact(replace_command(tokens, command_index, 2, &["bun"]))
+}
+
+fn rewrite_npm_create_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) -> BunRewrite {
+    let args = &tokens[command_index + 2..];
+    let mut uncertain_items = Vec::new();
+
+    for token in args {
+        let value = token.value.as_ref();
+        if value == "--" || value.starts_with('-') {
+            uncertain_items.push(token.raw.to_string());
+        } else {
+            break;
+        }
+    }
+
+    if !uncertain_items.is_empty() {
+        return BunRewrite::NeedsManualTranslation {
+            items: uncertain_items,
+            note: "Translate npm create flags manually after checking `bun create --help` instead of assuming the scaffolder flags line up exactly.",
+        };
+    }
+
+    BunRewrite::Exact(replace_command(
+        tokens,
+        command_index,
+        2,
+        &["bun", "create"],
+    ))
+}
+
+fn rewrite_npm_publish_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) -> BunRewrite {
+    let args = &tokens[command_index + 2..];
+    let uncertain_items = args
+        .iter()
+        .filter(|token| token.value.starts_with('-'))
+        .map(|token| token.raw.to_string())
+        .collect::<Vec<_>>();
+
+    if !uncertain_items.is_empty() {
+        return BunRewrite::NeedsManualTranslation {
+            items: uncertain_items,
+            note: "Translate npm publish flags manually after checking Bun's publish docs instead of assuming they behave the same.",
+        };
+    }
+
+    BunRewrite::Exact(replace_command(
+        tokens,
+        command_index,
+        2,
+        &["bun", "publish"],
+    ))
+}
+
+fn rewrite_npm_update_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) -> BunRewrite {
+    let args = &tokens[command_index + 2..];
+    let uncertain_items = args
+        .iter()
+        .filter(|token| token.value.starts_with('-') && !matches!(token.value.as_ref(), "--latest"))
+        .map(|token| token.raw.to_string())
+        .collect::<Vec<_>>();
+
+    if !uncertain_items.is_empty() {
+        return BunRewrite::NeedsManualTranslation {
+            items: uncertain_items,
+            note: "Translate npm update flags manually after checking Bun's update docs instead of guessing.",
+        };
+    }
+
+    BunRewrite::Exact(replace_command(
+        tokens,
+        command_index,
+        2,
+        &["bun", "update"],
+    ))
+}
+
+fn rewrite_npm_outdated_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) -> BunRewrite {
+    if tokens.len() > command_index + 2 {
+        let items = tokens[command_index + 2..]
+            .iter()
+            .map(|token| token.raw.to_string())
+            .collect::<Vec<_>>();
+        return BunRewrite::NeedsManualTranslation {
+            items,
+            note: "Translate npm outdated arguments manually after checking Bun's outdated command instead of assuming it accepts the same filters.",
+        };
+    }
+
+    BunRewrite::Exact(replace_command(
+        tokens,
+        command_index,
+        2,
+        &["bun", "outdated"],
+    ))
+}
+
+fn rewrite_npm_pack_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) -> BunRewrite {
+    if tokens.len() > command_index + 2 {
+        let items = tokens[command_index + 2..]
+            .iter()
+            .map(|token| token.raw.to_string())
+            .collect::<Vec<_>>();
+        return BunRewrite::NeedsManualTranslation {
+            items,
+            note: "Translate npm pack arguments manually after checking `bun pm pack` instead of assuming it accepts the same inputs.",
+        };
+    }
+
+    BunRewrite::Exact(replace_command(
+        tokens,
+        command_index,
+        2,
+        &["bun", "pm", "pack"],
+    ))
+}
+
+fn format_bun_manual_translation_message(base: &str, items: &[String], note: &str) -> String {
+    let mut message = String::from(base);
+
+    if !items.is_empty() {
+        message
+            .push_str("\nFlags or arguments requiring manual translation before switching to bun:");
+        for item in items {
+            message.push_str("\n  ");
+            message.push_str(item);
+        }
+    }
+
+    message.push('\n');
+    message.push_str(note);
+    message
+}
+
+fn is_simple_bun_exec_target(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(
+            |byte| matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'_' | b'-'),
+        )
 }
 
 fn insert_before_command(
@@ -1396,6 +2010,8 @@ enum AllowedCommand {
     Rg,
     Uv,
     Uvx,
+    Bun,
+    Bunx,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1403,6 +2019,8 @@ enum BlockedCommand {
     Grep(GrepKind),
     Python,
     Pip,
+    Npm,
+    Npx,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1465,6 +2083,8 @@ fn classify_token(token: &[u8]) -> TokenKind {
         b"rg" | b"ripgrep" => TokenKind::Allowed(AllowedCommand::Rg),
         b"uv" => TokenKind::Allowed(AllowedCommand::Uv),
         b"uvx" => TokenKind::Allowed(AllowedCommand::Uvx),
+        b"bun" => TokenKind::Allowed(AllowedCommand::Bun),
+        b"bunx" => TokenKind::Allowed(AllowedCommand::Bunx),
         b"sudo" => TokenKind::Wrapper(WrapperKind::Sudo),
         b"env" => TokenKind::Wrapper(WrapperKind::Env),
         b"command" => TokenKind::Wrapper(WrapperKind::Command),
@@ -1476,6 +2096,8 @@ fn classify_token(token: &[u8]) -> TokenKind {
         b"fgrep" => TokenKind::Blocked(BlockedCommand::Grep(GrepKind::Fgrep)),
         name if is_python_name(name) => TokenKind::Blocked(BlockedCommand::Python),
         name if is_pip_name(name) => TokenKind::Blocked(BlockedCommand::Pip),
+        b"npm" => TokenKind::Blocked(BlockedCommand::Npm),
+        b"npx" => TokenKind::Blocked(BlockedCommand::Npx),
         _ => TokenKind::Other,
     }
 }
@@ -2157,7 +2779,59 @@ mod tests {
     }
 
     #[test]
-    fn allows_uv_and_rg_usage() {
+    fn suggests_bun_rewrites() {
+        let install = decision_message("npm install");
+        assert!(install.contains(BUN_MESSAGE));
+        assert!(install.contains("bun install"));
+
+        let add = decision_message("npm install react");
+        assert!(add.contains("bun add react"));
+
+        let add_dev = decision_message("npm install --save-dev typescript");
+        assert!(add_dev.contains("bun add -d typescript"));
+
+        let remove = decision_message("npm uninstall react");
+        assert!(remove.contains("bun remove react"));
+
+        let run = decision_message("npm run dev");
+        assert!(run.contains("bun run dev"));
+
+        let exec = decision_message("npm exec vite -- --host");
+        assert!(exec.contains("bun vite -- --host"));
+
+        let create = decision_message("npm create vite@latest app");
+        assert!(create.contains("bun create vite@latest app"));
+
+        let publish = decision_message("npm publish dist");
+        assert!(publish.contains("bun publish dist"));
+
+        let update = decision_message("npm update --latest vite");
+        assert!(update.contains("bun update --latest vite"));
+
+        let pack = decision_message("npm pack");
+        assert!(pack.contains("bun pm pack"));
+
+        let npx = decision_message("npx prettier .");
+        assert!(npx.contains("bunx prettier ."));
+    }
+
+    #[test]
+    fn requires_manual_translation_for_uncertain_bun_mappings() {
+        let ci = decision_message("npm ci");
+        assert!(ci.contains("subcommand: ci"));
+        assert!(ci.contains("Translate this npm workflow manually"));
+
+        let npx = decision_message("npx --yes create-vite");
+        assert!(npx.contains("manual translation"));
+        assert!(npx.contains("\n  --yes"));
+
+        let exec = decision_message("npm exec @scope/tool");
+        assert!(exec.contains("@scope/tool"));
+        assert!(exec.contains("whether the Bun equivalent should be `bun` or `bunx`"));
+    }
+
+    #[test]
+    fn allows_uv_rg_and_bun_usage() {
         assert_eq!(evaluate_command("uv run pytest", RuleSet::all()), None);
         assert_eq!(
             evaluate_command("uv --directory repo run pytest", RuleSet::all()),
@@ -2166,6 +2840,8 @@ mod tests {
         assert_eq!(evaluate_command("uvx ruff check .", RuleSet::all()), None);
         assert_eq!(evaluate_command("rg pattern .", RuleSet::all()), None);
         assert_eq!(evaluate_command("ripgrep pattern .", RuleSet::all()), None);
+        assert_eq!(evaluate_command("bun run dev", RuleSet::all()), None);
+        assert_eq!(evaluate_command("bunx prettier .", RuleSet::all()), None);
     }
 
     #[test]
@@ -2270,11 +2946,13 @@ mod tests {
     fn reads_shared_rule_catalog_from_install_script() {
         let catalog = shared_rule_catalog();
 
-        assert_eq!(catalog.len(), 2);
+        assert_eq!(catalog.len(), 3);
         assert_eq!(catalog[0].cli_name, "rg");
         assert_eq!(catalog[0].aliases.as_slice(), ["ripgrep"]);
         assert_eq!(catalog[1].cli_name, "uv");
         assert!(catalog[1].aliases.is_empty());
+        assert_eq!(catalog[2].cli_name, "bun");
+        assert!(catalog[2].aliases.is_empty());
     }
 
     #[test]
@@ -2316,6 +2994,10 @@ mod tests {
             evaluate_command("uv init", RuleSet::only(RuleId::Ripgrep)),
             None
         );
+        assert_eq!(
+            evaluate_command("npm install react", RuleSet::only(RuleId::Uv)),
+            None
+        );
 
         let rg_only =
             decision_message_with_rules("grep -rn pattern .", RuleSet::only(RuleId::Ripgrep));
@@ -2323,6 +3005,9 @@ mod tests {
 
         let uv_only = decision_message_with_rules("python -m pytest", RuleSet::only(RuleId::Uv));
         assert!(uv_only.contains("uv run python -m pytest"));
+
+        let bun_only = decision_message_with_rules("npm run dev", RuleSet::only(RuleId::Bun));
+        assert!(bun_only.contains("bun run dev"));
     }
 
     #[test]

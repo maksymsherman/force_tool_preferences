@@ -23,6 +23,7 @@ rule_manifest() {
 # BEGIN_SHARED_RULE_CATALOG
 rg	ripgrep	grep-family -> rg enforcement	cargo,rg
 uv	-	python/pip-family -> uv enforcement	cargo,uv
+bun	-	npm/npx-family -> bun enforcement	cargo,bun
 # END_SHARED_RULE_CATALOG
 EOF
 }
@@ -333,6 +334,9 @@ missing_prerequisite_message() {
       ;;
     uv)
       printf "uv not found. Install uv first: https://docs.astral.sh/uv/\n"
+      ;;
+    bun)
+      printf "bun not found. Install bun first: https://bun.sh/\n"
       ;;
     *)
       printf "required tool '%s' not found for enabled rule '%s'\n" "$tool_name" "$rule_name"
