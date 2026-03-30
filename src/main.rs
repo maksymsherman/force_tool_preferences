@@ -695,12 +695,12 @@ fn parse_command_from_state<'a>(
                 &mut state.tokens,
             ),
             b'\'' => {
-                let start = state.token_start.get_or_insert(index);
+                let start = ensure_token_start(&mut state.token_start, index);
                 ensure_owned_value(command, *start, index, &mut state.value);
                 state.in_single_quote = true;
             }
             b'"' => {
-                let start = state.token_start.get_or_insert(index);
+                let start = ensure_token_start(&mut state.token_start, index);
                 ensure_owned_value(command, *start, index, &mut state.value);
                 state.in_double_quote = true;
             }
@@ -732,7 +732,7 @@ fn parse_command_from_state<'a>(
                 }
             }
             b'\\' => {
-                let start = state.token_start.get_or_insert(index);
+                let start = ensure_token_start(&mut state.token_start, index);
                 let value = ensure_owned_value(command, *start, index, &mut state.value);
                 if index + 1 < bytes.len() {
                     index += 1;
@@ -742,7 +742,7 @@ fn parse_command_from_state<'a>(
                 }
             }
             _ => {
-                state.token_start.get_or_insert(index);
+                ensure_token_start(&mut state.token_start, index);
                 if let Some(value) = state.value.as_mut() {
                     value.push(byte);
                 }
@@ -809,7 +809,7 @@ fn try_evaluate_simple_command(command: &str, rules: RuleSet) -> SimpleCommandOu
                 return SimpleCommandOutcome::Continue(state);
             }
             _ => {
-                state.token_start.get_or_insert(index);
+                ensure_token_start(&mut state.token_start, index);
             }
         }
     }
@@ -839,7 +839,21 @@ fn ensure_owned_value<'a, 'b>(
     prefix_end: usize,
     value: &'b mut Option<Vec<u8>>,
 ) -> &'b mut Vec<u8> {
-    value.get_or_insert_with(|| command[token_start..prefix_end].as_bytes().to_vec())
+    if value.is_none() {
+        *value = Some(command[token_start..prefix_end].as_bytes().to_vec());
+    }
+
+    value.as_mut().expect("value must be initialized")
+}
+
+fn ensure_token_start(token_start: &mut Option<usize>, index: usize) -> &mut usize {
+    if token_start.is_none() {
+        *token_start = Some(index);
+    }
+
+    token_start
+        .as_mut()
+        .expect("token start must be initialized")
 }
 
 fn flush_parsed_token<'a>(
