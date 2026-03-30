@@ -8,6 +8,7 @@ Combined shell-hook enforcement for preferred CLI tools in agent workflows.
 - Never run bare `python`, `python3`, `pip`, or `pip3`; use `uv` instead.
 - Never run `uv init` in an existing repo unless the user explicitly asks for project creation or conversion.
 - Never run `npm` or `npx`; use `bun` or `bunx` instead.
+- Never run `mypy`, `pyright`, or `basedpyright`; use `ty check` instead.
 - Agents may temporarily lower `perf_event_paranoid` for profiling or test runs that require `perf`, but they must record the original value first and restore it immediately after the script finishes, even if the run fails.
 
 ## Command mapping
@@ -27,11 +28,13 @@ Combined shell-hook enforcement for preferred CLI tools in agent workflows.
 - `npm init` -> `bun init`
 - `npm link` -> `bun link`
 - `npx prettier .` -> `bunx prettier .`
+- `mypy .` -> `ty check .`
+- `pyright src` -> `ty check src`
 
 ## Design notes
 
 - One combined PreToolUse hook replaces per-tool hooks to avoid repeated fork/exec overhead.
 - The Rust binary accepts `--claude-hook-json`, `--codex-hook-json`, and `--gemini-hook-json`.
-- The installer enables all shipped rule families by default and can scope installation to just `rg`, just `uv`, or just `bun`.
+- The installer enables all shipped rule families by default and can scope installation to just `rg`, just `uv`, just `bun`, or just `ty`.
 - Command evaluation is rule-family driven so future additions like `node` runtime rewrites can slot into the same dispatcher.
 - Rewrites should be exact when confidence is high and blocked for manual translation when semantics are unclear.

@@ -14,6 +14,7 @@ const GREP_MESSAGE: &str = "Use rg (ripgrep) instead of grep in this project. Re
 const PYTHON_MESSAGE: &str = "Use uv instead of bare Python or pip commands in this project. Replace the blocked command with 'uv run ...', 'uv add ...', 'uv add --dev ...', 'uv remove ...', or 'uv run --with ...' as appropriate.";
 const UV_INIT_MESSAGE: &str = "Do not run 'uv init' in an existing project unless the user explicitly asks for project creation or conversion. Inspect the repo first and prefer 'uv run', 'uv add', 'uv sync', or 'uv run --with'. If project initialization is truly needed, use 'uv init --no-readme --no-workspace' to avoid overwriting existing files and git history.";
 const BUN_MESSAGE: &str = "Use bun instead of npm or npx in this project. Replace blocked commands with 'bun install', 'bun add', 'bun remove', 'bun run', 'bunx', 'bun create', 'bun publish', 'bun update', or 'bun outdated' when the mapping is exact. If an npm or npx flag does not have a guaranteed Bun equivalent, translate it manually instead of guessing.";
+const TY_MESSAGE: &str = "Use ty for Python type checking in this project. Replace blocked type-checker commands with 'ty check ...' when the mapping is exact. If a flag is tool-specific or changes semantics, translate it manually after checking 'ty check --help' instead of guessing.";
 const INSTALL_SH_SOURCE: &str = include_str!("../install.sh");
 const SHARED_RULE_CATALOG_BEGIN: &str = "# BEGIN_SHARED_RULE_CATALOG";
 const SHARED_RULE_CATALOG_END: &str = "# END_SHARED_RULE_CATALOG";
@@ -23,9 +24,10 @@ enum RuleId {
     Ripgrep = 0,
     Uv = 1,
     Bun = 2,
+    Ty = 3,
 }
 
-const RULE_IDS: [RuleId; 3] = [RuleId::Ripgrep, RuleId::Uv, RuleId::Bun];
+const RULE_IDS: [RuleId; 4] = [RuleId::Ripgrep, RuleId::Uv, RuleId::Bun, RuleId::Ty];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RuleSpec {
@@ -33,7 +35,7 @@ struct RuleSpec {
     guidance: &'static str,
 }
 
-const RULE_SPECS: [RuleSpec; 3] = [
+const RULE_SPECS: [RuleSpec; 4] = [
     RuleSpec {
         manifest_id: "rg",
         guidance: GREP_MESSAGE,
@@ -45,6 +47,10 @@ const RULE_SPECS: [RuleSpec; 3] = [
     RuleSpec {
         manifest_id: "bun",
         guidance: BUN_MESSAGE,
+    },
+    RuleSpec {
+        manifest_id: "ty",
+        guidance: TY_MESSAGE,
     },
 ];
 
@@ -67,7 +73,8 @@ impl RuleSet {
     const RIPGREP: u32 = 1 << 0;
     const UV: u32 = 1 << 1;
     const BUN: u32 = 1 << 2;
-    const ALL: u32 = Self::RIPGREP | Self::UV | Self::BUN;
+    const TY: u32 = 1 << 3;
+    const ALL: u32 = Self::RIPGREP | Self::UV | Self::BUN | Self::TY;
 
     fn all() -> Self {
         Self(Self::ALL)
@@ -129,6 +136,7 @@ fn rule_mask(rule: RuleId) -> u32 {
         RuleId::Ripgrep => RuleSet::RIPGREP,
         RuleId::Uv => RuleSet::UV,
         RuleId::Bun => RuleSet::BUN,
+        RuleId::Ty => RuleSet::TY,
     }
 }
 
@@ -845,16 +853,27 @@ fn evaluate_segment(tokens: &[ParsedToken<'_>], rules: RuleSet) -> Option<BlockD
                 wrapper = Some(kind);
             }
             TokenKind::Allowed(AllowedCommand::Rg)
-            | TokenKind::Allowed(AllowedCommand::Uvx)
             | TokenKind::Allowed(AllowedCommand::Bun)
-            | TokenKind::Allowed(AllowedCommand::Bunx) => {
+            | TokenKind::Allowed(AllowedCommand::Bunx)
+            | TokenKind::Allowed(AllowedCommand::Ty) => {
+                return None;
+            }
+            TokenKind::Allowed(AllowedCommand::Uvx) => {
+                if rules.contains(RuleId::Ty) {
+                    if let Some(decision) = build_uvx_type_checker_decision(tokens, index) {
+                        return Some(decision);
+                    }
+                }
                 return None;
             }
             TokenKind::Allowed(AllowedCommand::Uv) => {
+                if let Some(decision) = evaluate_uv_command(tokens, index, rules) {
+                    return Some(decision);
+                }
                 if !rules.contains(RuleId::Uv) {
                     return None;
                 }
-                return evaluate_uv_command(tokens, index);
+                return None;
             }
             TokenKind::Blocked(BlockedCommand::Grep(kind)) => {
                 if !rules.contains(RuleId::Ripgrep) {
@@ -863,6 +882,11 @@ fn evaluate_segment(tokens: &[ParsedToken<'_>], rules: RuleSet) -> Option<BlockD
                 return Some(build_grep_decision(tokens, index, kind));
             }
             TokenKind::Blocked(BlockedCommand::Python) => {
+                if rules.contains(RuleId::Ty) {
+                    if let Some(decision) = build_python_type_checker_decision(tokens, index) {
+                        return Some(decision);
+                    }
+                }
                 if !rules.contains(RuleId::Uv) {
                     return None;
                 }
@@ -885,6 +909,12 @@ fn evaluate_segment(tokens: &[ParsedToken<'_>], rules: RuleSet) -> Option<BlockD
                     return None;
                 }
                 return Some(build_npx_decision(tokens, index));
+            }
+            TokenKind::Blocked(BlockedCommand::TypeChecker(kind)) => {
+                if !rules.contains(RuleId::Ty) {
+                    return None;
+                }
+                return Some(build_type_checker_decision(tokens, index, kind));
             }
             TokenKind::Other => return None,
         }
@@ -921,10 +951,101 @@ fn build_npx_decision(tokens: &[ParsedToken<'_>], command_index: usize) -> Block
     }
 }
 
-fn evaluate_uv_command(tokens: &[ParsedToken<'_>], command_index: usize) -> Option<BlockDecision> {
+fn build_type_checker_decision(
+    tokens: &[ParsedToken<'_>],
+    command_index: usize,
+    kind: TypeCheckerKind,
+) -> BlockDecision {
+    match rewrite_type_checker_to_ty(tokens, command_index, kind) {
+        TypeCheckerRewrite::Exact(suggestion) => BlockDecision::new(into_exact_suggestion_message(
+            rule_spec(RuleId::Ty).guidance,
+            suggestion,
+        )),
+        TypeCheckerRewrite::NeedsManualTranslation { items, note } => {
+            BlockDecision::new(format_type_checker_manual_translation_message(
+                rule_spec(RuleId::Ty).guidance,
+                &items,
+                note,
+            ))
+        }
+    }
+}
+
+fn build_uvx_type_checker_decision(
+    tokens: &[ParsedToken<'_>],
+    command_index: usize,
+) -> Option<BlockDecision> {
+    let target_index = command_index + 1;
+    let kind = match tokens.get(target_index).map(|token| token.value.as_ref()) {
+        Some(value) if value.eq_ignore_ascii_case("mypy") => TypeCheckerKind::Mypy,
+        Some(value) if value.eq_ignore_ascii_case("pyright") => TypeCheckerKind::Pyright,
+        Some(value) if value.eq_ignore_ascii_case("basedpyright") => TypeCheckerKind::BasedPyright,
+        _ => return None,
+    };
+
+    Some(
+        match rewrite_uv_wrapper_type_checker_to_ty(tokens, command_index, target_index, kind) {
+            TypeCheckerRewrite::Exact(suggestion) => BlockDecision::new(
+                into_exact_suggestion_message(rule_spec(RuleId::Ty).guidance, suggestion),
+            ),
+            TypeCheckerRewrite::NeedsManualTranslation { items, note } => {
+                BlockDecision::new(format_type_checker_manual_translation_message(
+                    rule_spec(RuleId::Ty).guidance,
+                    &items,
+                    note,
+                ))
+            }
+        },
+    )
+}
+
+fn build_python_type_checker_decision(
+    tokens: &[ParsedToken<'_>],
+    command_index: usize,
+) -> Option<BlockDecision> {
+    let Some(module_flag) = tokens
+        .get(command_index + 1)
+        .map(|token| token.value.as_ref())
+    else {
+        return None;
+    };
+    if module_flag != "-m" {
+        return None;
+    }
+
+    let module_index = command_index + 2;
+    let module_name = normalized_program_name(tokens.get(module_index)?.value.as_bytes());
+    let kind = match module_name {
+        b"mypy" => TypeCheckerKind::Mypy,
+        b"pyright" => TypeCheckerKind::Pyright,
+        b"basedpyright" => TypeCheckerKind::BasedPyright,
+        _ => return None,
+    };
+
+    Some(
+        match rewrite_python_module_type_checker_to_ty(tokens, command_index, kind) {
+            TypeCheckerRewrite::Exact(suggestion) => BlockDecision::new(
+                into_exact_suggestion_message(rule_spec(RuleId::Ty).guidance, suggestion),
+            ),
+            TypeCheckerRewrite::NeedsManualTranslation { items, note } => {
+                BlockDecision::new(format_type_checker_manual_translation_message(
+                    rule_spec(RuleId::Ty).guidance,
+                    &items,
+                    note,
+                ))
+            }
+        },
+    )
+}
+
+fn evaluate_uv_command(
+    tokens: &[ParsedToken<'_>],
+    command_index: usize,
+    rules: RuleSet,
+) -> Option<BlockDecision> {
     let mut skip_next_value = false;
 
-    for token in &tokens[command_index + 1..] {
+    for (offset, token) in tokens[command_index + 1..].iter().enumerate() {
         let value = token.value.as_bytes();
 
         if skip_next_value {
@@ -945,8 +1066,21 @@ fn evaluate_uv_command(tokens: &[ParsedToken<'_>], command_index: usize) -> Opti
             continue;
         }
 
+        let subcommand_index = command_index + 1 + offset;
+
         if normalized_program_name(value) == b"init" {
-            return Some(BlockDecision::new(UV_INIT_MESSAGE));
+            if rules.contains(RuleId::Uv) {
+                return Some(BlockDecision::new(UV_INIT_MESSAGE));
+            }
+            return None;
+        }
+
+        if rules.contains(RuleId::Ty) {
+            if let Some(decision) =
+                build_uv_type_checker_decision(tokens, command_index, subcommand_index)
+            {
+                return Some(decision);
+            }
         }
 
         return None;
@@ -1199,6 +1333,21 @@ enum NpmInstallMode {
 }
 
 enum BunRewrite {
+    Exact(String),
+    NeedsManualTranslation {
+        items: Vec<String>,
+        note: &'static str,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TypeCheckerKind {
+    Mypy,
+    Pyright,
+    BasedPyright,
+}
+
+enum TypeCheckerRewrite {
     Exact(String),
     NeedsManualTranslation {
         items: Vec<String>,
@@ -1705,12 +1854,7 @@ fn rewrite_npm_init_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) -> 
     let args = &tokens[command_index + 2..];
 
     if args.is_empty() {
-        return BunRewrite::Exact(replace_command(
-            tokens,
-            command_index,
-            2,
-            &["bun", "init"],
-        ));
+        return BunRewrite::Exact(replace_command(tokens, command_index, 2, &["bun", "init"]));
     }
 
     let all_yes = args
@@ -1747,12 +1891,7 @@ fn rewrite_npm_link_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) -> 
         };
     }
 
-    BunRewrite::Exact(replace_command(
-        tokens,
-        command_index,
-        2,
-        &["bun", "link"],
-    ))
+    BunRewrite::Exact(replace_command(tokens, command_index, 2, &["bun", "link"]))
 }
 
 fn format_bun_manual_translation_message(base: &str, items: &[String], note: &str) -> String {
@@ -1761,6 +1900,265 @@ fn format_bun_manual_translation_message(base: &str, items: &[String], note: &st
     if !items.is_empty() {
         message
             .push_str("\nFlags or arguments requiring manual translation before switching to bun:");
+        for item in items {
+            message.push_str("\n  ");
+            message.push_str(item);
+        }
+    }
+
+    message.push('\n');
+    message.push_str(note);
+    message
+}
+
+fn rewrite_type_checker_to_ty(
+    tokens: &[ParsedToken<'_>],
+    command_index: usize,
+    kind: TypeCheckerKind,
+) -> TypeCheckerRewrite {
+    let args = &tokens[command_index + 1..];
+    if let Some(items) = collect_type_checker_manual_items(args) {
+        return TypeCheckerRewrite::NeedsManualTranslation {
+            items,
+            note: type_checker_manual_note(kind),
+        };
+    }
+
+    TypeCheckerRewrite::Exact(replace_command(tokens, command_index, 1, &["ty", "check"]))
+}
+
+fn rewrite_python_module_type_checker_to_ty(
+    tokens: &[ParsedToken<'_>],
+    command_index: usize,
+    kind: TypeCheckerKind,
+) -> TypeCheckerRewrite {
+    let args = &tokens[command_index + 3..];
+    if let Some(items) = collect_type_checker_manual_items(args) {
+        return TypeCheckerRewrite::NeedsManualTranslation {
+            items,
+            note: type_checker_manual_note(kind),
+        };
+    }
+
+    TypeCheckerRewrite::Exact(replace_command(tokens, command_index, 3, &["ty", "check"]))
+}
+
+fn rewrite_uv_wrapper_type_checker_to_ty(
+    tokens: &[ParsedToken<'_>],
+    command_index: usize,
+    target_index: usize,
+    kind: TypeCheckerKind,
+) -> TypeCheckerRewrite {
+    let args = &tokens[target_index + 1..];
+    if let Some(items) = collect_type_checker_manual_items(args) {
+        return TypeCheckerRewrite::NeedsManualTranslation {
+            items,
+            note: type_checker_wrapper_manual_note(kind),
+        };
+    }
+
+    let consumed = target_index - command_index + 1;
+    TypeCheckerRewrite::Exact(replace_command(
+        tokens,
+        command_index,
+        consumed,
+        &["ty", "check"],
+    ))
+}
+
+fn rewrite_uv_wrapper_python_module_type_checker_to_ty(
+    tokens: &[ParsedToken<'_>],
+    command_index: usize,
+    module_index: usize,
+    kind: TypeCheckerKind,
+) -> TypeCheckerRewrite {
+    let args = &tokens[module_index + 1..];
+    if let Some(items) = collect_type_checker_manual_items(args) {
+        return TypeCheckerRewrite::NeedsManualTranslation {
+            items,
+            note: type_checker_wrapper_manual_note(kind),
+        };
+    }
+
+    let consumed = module_index - command_index + 1;
+    TypeCheckerRewrite::Exact(replace_command(
+        tokens,
+        command_index,
+        consumed,
+        &["ty", "check"],
+    ))
+}
+
+fn collect_type_checker_manual_items(tokens: &[ParsedToken<'_>]) -> Option<Vec<String>> {
+    let items = tokens
+        .iter()
+        .filter(|token| token.value == "--" || token.value.starts_with('-'))
+        .map(|token| token.raw.to_string())
+        .collect::<Vec<_>>();
+
+    if items.is_empty() {
+        None
+    } else {
+        Some(items)
+    }
+}
+
+fn build_uv_type_checker_decision(
+    tokens: &[ParsedToken<'_>],
+    command_index: usize,
+    subcommand_index: usize,
+) -> Option<BlockDecision> {
+    let subcommand = normalized_program_name(tokens[subcommand_index].value.as_bytes());
+    let rewrite = match subcommand {
+        b"run" => rewrite_uv_run_type_checker_to_ty(tokens, command_index, subcommand_index)?,
+        b"tool" => rewrite_uv_tool_run_type_checker_to_ty(tokens, command_index, subcommand_index)?,
+        _ => return None,
+    };
+
+    Some(match rewrite {
+        TypeCheckerRewrite::Exact(suggestion) => BlockDecision::new(into_exact_suggestion_message(
+            rule_spec(RuleId::Ty).guidance,
+            suggestion,
+        )),
+        TypeCheckerRewrite::NeedsManualTranslation { items, note } => {
+            BlockDecision::new(format_type_checker_manual_translation_message(
+                rule_spec(RuleId::Ty).guidance,
+                &items,
+                note,
+            ))
+        }
+    })
+}
+
+fn rewrite_uv_run_type_checker_to_ty(
+    tokens: &[ParsedToken<'_>],
+    command_index: usize,
+    run_index: usize,
+) -> Option<TypeCheckerRewrite> {
+    let mut wrapper_items = Vec::new();
+    let mut target_index = None;
+    let mut skip_next_value = false;
+
+    for index in run_index + 1..tokens.len() {
+        let value = tokens[index].value.as_ref();
+        if skip_next_value {
+            skip_next_value = false;
+            continue;
+        }
+        if is_shell_assignment(tokens[index].value.as_bytes()) {
+            continue;
+        }
+        if value == "--" || value.starts_with('-') {
+            wrapper_items.push(tokens[index].raw.to_string());
+            skip_next_value = uv_run_option_takes_value(value);
+            continue;
+        }
+        target_index = Some(index);
+        break;
+    }
+
+    let target_index = target_index?;
+    let target = normalized_program_name(tokens[target_index].value.as_bytes());
+
+    let kind = match target {
+        b"mypy" => Some(TypeCheckerKind::Mypy),
+        b"pyright" => Some(TypeCheckerKind::Pyright),
+        b"basedpyright" => Some(TypeCheckerKind::BasedPyright),
+        b"python" => match (
+            tokens
+                .get(target_index + 1)
+                .map(|token| token.value.as_ref()),
+            tokens
+                .get(target_index + 2)
+                .map(|token| normalized_program_name(token.value.as_bytes())),
+        ) {
+            (Some("-m"), Some(b"mypy")) => Some(TypeCheckerKind::Mypy),
+            (Some("-m"), Some(b"pyright")) => Some(TypeCheckerKind::Pyright),
+            (Some("-m"), Some(b"basedpyright")) => Some(TypeCheckerKind::BasedPyright),
+            _ => None,
+        },
+        _ => None,
+    }?;
+
+    if !wrapper_items.is_empty() {
+        return Some(TypeCheckerRewrite::NeedsManualTranslation {
+            items: wrapper_items,
+            note: type_checker_wrapper_manual_note(kind),
+        });
+    }
+
+    Some(if target == b"python" {
+        rewrite_uv_wrapper_python_module_type_checker_to_ty(
+            tokens,
+            command_index,
+            target_index + 2,
+            kind,
+        )
+    } else {
+        rewrite_uv_wrapper_type_checker_to_ty(tokens, command_index, target_index, kind)
+    })
+}
+
+fn rewrite_uv_tool_run_type_checker_to_ty(
+    tokens: &[ParsedToken<'_>],
+    command_index: usize,
+    tool_index: usize,
+) -> Option<TypeCheckerRewrite> {
+    let run_index = tool_index + 1;
+    let run_token = tokens.get(run_index)?;
+    if !run_token.value.eq_ignore_ascii_case("run") {
+        return None;
+    }
+
+    rewrite_uv_run_type_checker_to_ty(tokens, command_index, run_index)
+}
+
+fn uv_run_option_takes_value(value: &str) -> bool {
+    matches!(
+        value,
+        "--python"
+            | "-p"
+            | "--with"
+            | "--project"
+            | "--directory"
+            | "--env-file"
+            | "--python-platform"
+            | "--python-version"
+    )
+}
+
+fn type_checker_manual_note(kind: TypeCheckerKind) -> &'static str {
+    match kind {
+        TypeCheckerKind::Mypy => {
+            "Translate mypy-specific flags manually after checking `ty check --help` instead of assuming they behave the same."
+        }
+        TypeCheckerKind::Pyright | TypeCheckerKind::BasedPyright => {
+            "Translate pyright-specific flags manually after checking `ty check --help` instead of assuming they behave the same."
+        }
+    }
+}
+
+fn type_checker_wrapper_manual_note(kind: TypeCheckerKind) -> &'static str {
+    match kind {
+        TypeCheckerKind::Mypy => {
+            "Translate the uv wrapper flags and mypy-specific flags manually after checking `ty check --help` instead of assuming they behave the same."
+        }
+        TypeCheckerKind::Pyright | TypeCheckerKind::BasedPyright => {
+            "Translate the uv wrapper flags and pyright-specific flags manually after checking `ty check --help` instead of assuming they behave the same."
+        }
+    }
+}
+
+fn format_type_checker_manual_translation_message(
+    base: &str,
+    items: &[String],
+    note: &str,
+) -> String {
+    let mut message = String::from(base);
+
+    if !items.is_empty() {
+        message
+            .push_str("\nFlags or arguments requiring manual translation before switching to ty:");
         for item in items {
             message.push_str("\n  ");
             message.push_str(item);
@@ -2195,6 +2593,7 @@ enum AllowedCommand {
     Uvx,
     Bun,
     Bunx,
+    Ty,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2204,6 +2603,7 @@ enum BlockedCommand {
     Pip,
     Npm,
     Npx,
+    TypeChecker(TypeCheckerKind),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2268,6 +2668,7 @@ fn classify_token(token: &[u8]) -> TokenKind {
         b"uvx" => TokenKind::Allowed(AllowedCommand::Uvx),
         b"bun" => TokenKind::Allowed(AllowedCommand::Bun),
         b"bunx" => TokenKind::Allowed(AllowedCommand::Bunx),
+        b"ty" => TokenKind::Allowed(AllowedCommand::Ty),
         b"sudo" => TokenKind::Wrapper(WrapperKind::Sudo),
         b"env" => TokenKind::Wrapper(WrapperKind::Env),
         b"command" => TokenKind::Wrapper(WrapperKind::Command),
@@ -2281,6 +2682,11 @@ fn classify_token(token: &[u8]) -> TokenKind {
         name if is_pip_name(name) => TokenKind::Blocked(BlockedCommand::Pip),
         b"npm" => TokenKind::Blocked(BlockedCommand::Npm),
         b"npx" => TokenKind::Blocked(BlockedCommand::Npx),
+        b"mypy" => TokenKind::Blocked(BlockedCommand::TypeChecker(TypeCheckerKind::Mypy)),
+        b"pyright" => TokenKind::Blocked(BlockedCommand::TypeChecker(TypeCheckerKind::Pyright)),
+        b"basedpyright" => {
+            TokenKind::Blocked(BlockedCommand::TypeChecker(TypeCheckerKind::BasedPyright))
+        }
         _ => TokenKind::Other,
     }
 }
@@ -3033,8 +3439,55 @@ mod tests {
     }
 
     #[test]
-    fn requires_manual_translation_for_uncertain_bun_mappings() {
+    fn suggests_ty_rewrites() {
+        let mypy = decision_message("mypy .");
+        assert!(mypy.contains(TY_MESSAGE));
+        assert!(mypy.contains("ty check ."));
 
+        let pyright = decision_message("pyright src");
+        assert!(pyright.contains("ty check src"));
+
+        let basedpyright = decision_message("basedpyright packages/api");
+        assert!(basedpyright.contains("ty check packages/api"));
+
+        let python_module = decision_message("python -m mypy .");
+        assert!(python_module.contains(TY_MESSAGE));
+        assert!(python_module.contains("ty check ."));
+        assert!(!python_module.contains("uv run python -m mypy ."));
+
+        let ty_only_python_module =
+            decision_message_with_rules("python -m mypy .", RuleSet::only(RuleId::Ty));
+        assert!(ty_only_python_module.contains("ty check ."));
+
+        let uv_run = decision_message_with_rules("uv run mypy .", RuleSet::only(RuleId::Ty));
+        assert!(uv_run.contains("ty check ."));
+
+        let uv_run_python =
+            decision_message_with_rules("uv run python -m mypy .", RuleSet::only(RuleId::Ty));
+        assert!(uv_run_python.contains("ty check ."));
+
+        let uvx = decision_message_with_rules("uvx mypy .", RuleSet::only(RuleId::Ty));
+        assert!(uvx.contains("ty check ."));
+    }
+
+    #[test]
+    fn requires_manual_translation_for_uncertain_ty_mappings() {
+        let mypy = decision_message("mypy --strict .");
+        assert!(mypy.contains("manual translation"));
+        assert!(mypy.contains("\n  --strict"));
+
+        let pyright = decision_message("pyright --watch src");
+        assert!(pyright.contains("manual translation"));
+        assert!(pyright.contains("\n  --watch"));
+
+        let uv_run =
+            decision_message_with_rules("uv run --python 3.12 mypy .", RuleSet::only(RuleId::Ty));
+        assert!(uv_run.contains("manual translation"));
+        assert!(uv_run.contains("\n  --python"));
+    }
+
+    #[test]
+    fn requires_manual_translation_for_uncertain_bun_mappings() {
         let npx = decision_message("npx --yes create-vite");
         assert!(npx.contains("manual translation"));
         assert!(npx.contains("\n  --yes"));
@@ -3065,6 +3518,7 @@ mod tests {
         assert_eq!(evaluate_command("ripgrep pattern .", RuleSet::all()), None);
         assert_eq!(evaluate_command("bun run dev", RuleSet::all()), None);
         assert_eq!(evaluate_command("bunx prettier .", RuleSet::all()), None);
+        assert_eq!(evaluate_command("ty check .", RuleSet::all()), None);
     }
 
     #[test]
@@ -3169,13 +3623,15 @@ mod tests {
     fn reads_shared_rule_catalog_from_install_script() {
         let catalog = shared_rule_catalog();
 
-        assert_eq!(catalog.len(), 3);
+        assert_eq!(catalog.len(), 4);
         assert_eq!(catalog[0].cli_name, "rg");
         assert_eq!(catalog[0].aliases.as_slice(), ["ripgrep"]);
         assert_eq!(catalog[1].cli_name, "uv");
         assert!(catalog[1].aliases.is_empty());
         assert_eq!(catalog[2].cli_name, "bun");
         assert!(catalog[2].aliases.is_empty());
+        assert_eq!(catalog[3].cli_name, "ty");
+        assert!(catalog[3].aliases.is_empty());
     }
 
     #[test]
@@ -3221,6 +3677,7 @@ mod tests {
             evaluate_command("npm install react", RuleSet::only(RuleId::Uv)),
             None
         );
+        assert_eq!(evaluate_command("mypy .", RuleSet::only(RuleId::Uv)), None);
 
         let rg_only =
             decision_message_with_rules("grep -rn pattern .", RuleSet::only(RuleId::Ripgrep));
@@ -3231,6 +3688,9 @@ mod tests {
 
         let bun_only = decision_message_with_rules("npm run dev", RuleSet::only(RuleId::Bun));
         assert!(bun_only.contains("bun run dev"));
+
+        let ty_only = decision_message_with_rules("mypy .", RuleSet::only(RuleId::Ty));
+        assert!(ty_only.contains("ty check ."));
     }
 
     #[test]

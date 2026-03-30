@@ -8,6 +8,7 @@ Use preferred CLI tools consistently in this repo.
 - Use `uv` instead of bare `python`, `python3`, `pip`, or `pip3`.
 - Do not run `uv init` in an existing repo unless the user explicitly asks for project creation or conversion.
 - Use `bun` or `bunx` instead of `npm` or `npx`.
+- Use `ty check` instead of `mypy`, `pyright`, or `basedpyright`.
 
 ## Examples
 
@@ -19,3 +20,5 @@ Use preferred CLI tools consistently in this repo.
 - `npm test` -> `bun run test`
 - `npm init` -> `bun init`
 - `npx prettier .` -> `bunx prettier .`
+- `mypy .` -> `ty check .`
+- `pyright src` -> `ty check src`

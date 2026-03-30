@@ -1,6 +1,6 @@
 # force_tool_preferences
 
-Use `rg` for grep-family searches, `uv` for Python and pip workflows, and `bun`/`bunx` for npm/npx workflows.
+Use `rg` for grep-family searches, `uv` for Python and pip workflows, `bun`/`bunx` for npm/npx workflows, and `ty check` for Python type-checking workflows.
 
 ## Rules
 
@@ -8,6 +8,7 @@ Use `rg` for grep-family searches, `uv` for Python and pip workflows, and `bun`/
 - Never run bare `python`, `python3`, `pip`, or `pip3`.
 - Never run `uv init` in an existing repo unless the user explicitly asks for it.
 - Never run `npm` or `npx`.
+- Never run `mypy`, `pyright`, or `basedpyright`.
 
 ## Notes
 
