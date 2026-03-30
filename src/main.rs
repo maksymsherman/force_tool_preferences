@@ -626,26 +626,29 @@ fn escape_json(value: &str) -> String {
 }
 
 fn evaluate_command(command: &str, rules: RuleSet) -> Option<BlockDecision> {
-    if let Ok(decision) = try_evaluate_simple_command(command, rules) {
-        return decision;
+    match try_evaluate_simple_command(command, rules) {
+        SimpleCommandOutcome::Complete(decision) => decision,
+        SimpleCommandOutcome::Continue(state) => parse_command_from_state(command, rules, state),
     }
+}
 
+fn parse_command_from_state<'a>(
+    command: &'a str,
+    rules: RuleSet,
+    mut state: CommandParseState<'a>,
+) -> Option<BlockDecision> {
     let bytes = command.as_bytes();
-    let mut tokens = TokenBuffer::new();
-    let mut token_start = None;
-    let mut value: Option<Vec<u8>> = None;
-    let mut in_single_quote = false;
-    let mut in_double_quote = false;
-    let mut index = 0usize;
+    let mut index = state.index;
 
     while index < bytes.len() {
         let byte = bytes[index];
 
-        if in_single_quote {
+        if state.in_single_quote {
             if byte == b'\'' {
-                in_single_quote = false;
+                state.in_single_quote = false;
             } else {
-                value
+                state
+                    .value
                     .as_mut()
                     .expect("quoted tokens must use an owned value buffer")
                     .push(byte);
@@ -654,24 +657,27 @@ fn evaluate_command(command: &str, rules: RuleSet) -> Option<BlockDecision> {
             continue;
         }
 
-        if in_double_quote {
+        if state.in_double_quote {
             match byte {
-                b'"' => in_double_quote = false,
+                b'"' => state.in_double_quote = false,
                 b'\\' => {
                     if index + 1 < bytes.len() {
                         index += 1;
-                        value
+                        state
+                            .value
                             .as_mut()
                             .expect("quoted tokens must use an owned value buffer")
                             .push(bytes[index]);
                     } else {
-                        value
+                        state
+                            .value
                             .as_mut()
                             .expect("quoted tokens must use an owned value buffer")
                             .push(b'\\');
                     }
                 }
-                _ => value
+                _ => state
+                    .value
                     .as_mut()
                     .expect("quoted tokens must use an owned value buffer")
                     .push(byte),
@@ -681,28 +687,44 @@ fn evaluate_command(command: &str, rules: RuleSet) -> Option<BlockDecision> {
         }
 
         match byte {
-            b' ' | b'\n' | b'\r' | b'\t' => {
-                flush_parsed_token(command, index, &mut token_start, &mut value, &mut tokens)
-            }
+            b' ' | b'\n' | b'\r' | b'\t' => flush_parsed_token(
+                command,
+                index,
+                &mut state.token_start,
+                &mut state.value,
+                &mut state.tokens,
+            ),
             b'\'' => {
-                let start = token_start.get_or_insert(index);
-                ensure_owned_value(command, *start, index, &mut value);
-                in_single_quote = true;
+                let start = state.token_start.get_or_insert(index);
+                ensure_owned_value(command, *start, index, &mut state.value);
+                state.in_single_quote = true;
             }
             b'"' => {
-                let start = token_start.get_or_insert(index);
-                ensure_owned_value(command, *start, index, &mut value);
-                in_double_quote = true;
+                let start = state.token_start.get_or_insert(index);
+                ensure_owned_value(command, *start, index, &mut state.value);
+                state.in_double_quote = true;
             }
             b';' => {
-                flush_parsed_token(command, index, &mut token_start, &mut value, &mut tokens);
-                if let Some(decision) = evaluate_parsed_segment(&mut tokens, rules) {
+                flush_parsed_token(
+                    command,
+                    index,
+                    &mut state.token_start,
+                    &mut state.value,
+                    &mut state.tokens,
+                );
+                if let Some(decision) = evaluate_parsed_segment(&mut state.tokens, rules) {
                     return Some(decision);
                 }
             }
             b'|' | b'&' => {
-                flush_parsed_token(command, index, &mut token_start, &mut value, &mut tokens);
-                if let Some(decision) = evaluate_parsed_segment(&mut tokens, rules) {
+                flush_parsed_token(
+                    command,
+                    index,
+                    &mut state.token_start,
+                    &mut state.value,
+                    &mut state.tokens,
+                );
+                if let Some(decision) = evaluate_parsed_segment(&mut state.tokens, rules) {
                     return Some(decision);
                 }
                 if index + 1 < bytes.len() && bytes[index + 1] == byte {
@@ -710,8 +732,8 @@ fn evaluate_command(command: &str, rules: RuleSet) -> Option<BlockDecision> {
                 }
             }
             b'\\' => {
-                let start = token_start.get_or_insert(index);
-                let value = ensure_owned_value(command, *start, index, &mut value);
+                let start = state.token_start.get_or_insert(index);
+                let value = ensure_owned_value(command, *start, index, &mut state.value);
                 if index + 1 < bytes.len() {
                     index += 1;
                     value.push(bytes[index]);
@@ -720,8 +742,8 @@ fn evaluate_command(command: &str, rules: RuleSet) -> Option<BlockDecision> {
                 }
             }
             _ => {
-                token_start.get_or_insert(index);
-                if let Some(value) = value.as_mut() {
+                state.token_start.get_or_insert(index);
+                if let Some(value) = state.value.as_mut() {
                     value.push(byte);
                 }
             }
@@ -733,47 +755,74 @@ fn evaluate_command(command: &str, rules: RuleSet) -> Option<BlockDecision> {
     flush_parsed_token(
         command,
         bytes.len(),
-        &mut token_start,
-        &mut value,
-        &mut tokens,
+        &mut state.token_start,
+        &mut state.value,
+        &mut state.tokens,
     );
-    evaluate_parsed_segment(&mut tokens, rules)
+    evaluate_parsed_segment(&mut state.tokens, rules)
 }
 
-fn try_evaluate_simple_command(command: &str, rules: RuleSet) -> Result<Option<BlockDecision>, ()> {
-    let mut tokens = TokenBuffer::new();
+enum SimpleCommandOutcome<'a> {
+    Complete(Option<BlockDecision>),
+    Continue(CommandParseState<'a>),
+}
+
+struct CommandParseState<'a> {
+    tokens: TokenBuffer<'a>,
+    token_start: Option<usize>,
+    value: Option<Vec<u8>>,
+    in_single_quote: bool,
+    in_double_quote: bool,
+    index: usize,
+}
+
+impl<'a> CommandParseState<'a> {
+    fn new() -> Self {
+        Self {
+            tokens: TokenBuffer::new(),
+            token_start: None,
+            value: None,
+            in_single_quote: false,
+            in_double_quote: false,
+            index: 0,
+        }
+    }
+}
+
+fn try_evaluate_simple_command(command: &str, rules: RuleSet) -> SimpleCommandOutcome<'_> {
     let bytes = command.as_bytes();
-    let mut token_start = None;
+    let mut state = CommandParseState::new();
 
     for (index, byte) in bytes.iter().copied().enumerate() {
         match byte {
             b' ' => {
-                if let Some(start) = token_start.take() {
+                if let Some(start) = state.token_start.take() {
                     let raw = &command[start..index];
-                    tokens.push(ParsedToken {
+                    state.tokens.push(ParsedToken {
                         raw,
                         value: Cow::Borrowed(raw),
                     });
                 }
             }
             b'\'' | b'"' | b'\\' | b';' | b'|' | b'&' | b'\n' | b'\r' | b'\t' => {
-                return Err(());
+                state.index = index;
+                return SimpleCommandOutcome::Continue(state);
             }
             _ => {
-                token_start.get_or_insert(index);
+                state.token_start.get_or_insert(index);
             }
         }
     }
 
-    if let Some(start) = token_start {
+    if let Some(start) = state.token_start {
         let raw = &command[start..];
-        tokens.push(ParsedToken {
+        state.tokens.push(ParsedToken {
             raw,
             value: Cow::Borrowed(raw),
         });
     }
 
-    Ok(evaluate_segment(&tokens, rules))
+    SimpleCommandOutcome::Complete(evaluate_parsed_segment(&mut state.tokens, rules))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
