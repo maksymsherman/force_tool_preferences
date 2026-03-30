@@ -91,7 +91,7 @@ Common outcomes:
 | `npx prettier .` | suggest `bunx prettier .` |
 | `mypy .` | suggest `ty check .` |
 | `pyright src` | suggest `ty check src` |
-| `uv run mypy .` | suggest `ty check .` |
+| `uv run mypy .` | suggest `uv run ty check .` |
 | `grep -s TODO file.txt` | blocked for manual translation |
 
 ## Quick Example
@@ -163,7 +163,7 @@ Suggested replacement:
 ```
 
 ```text
-Use ty for Python type checking in this project. Replace blocked type-checker commands with 'ty check ...' when the mapping is exact. If a flag is tool-specific or changes semantics, translate it manually after checking 'ty check --help' instead of guessing.
+Use ty for Python type checking in this project. Replace blocked type-checker commands with 'ty check ...' when the mapping is exact, preserving uv or uvx wrappers when they define the execution environment. If a flag is tool-specific or changes semantics, translate it manually after checking 'ty check --help' instead of guessing.
 Suggested replacement:
   ty check .
 ```
@@ -518,8 +518,8 @@ Typical outcomes:
 - `pyright src` -> `ty check src`
 - `basedpyright packages/api` -> `ty check packages/api`
 - `python -m mypy .` -> `ty check .`
-- `uv run mypy .` -> `ty check .`
-- `uvx mypy .` -> `ty check .`
+- `uv run mypy .` -> `uv run ty check .`
+- `uvx mypy .` -> `uvx ty check .`
 
 If the original type-checker command depends on tool-specific flags, the command is blocked and the flagged options are listed explicitly so you can translate them manually.
 
@@ -1015,7 +1015,7 @@ Yes. The evaluator understands wrappers such as `sudo`, `env`, `command`, `time`
 
 ### Will it allow `rg`, `uv`, `uvx`, `bun`, `bunx`, and `ty`?
 
-`rg`, `uvx`, `bun`, `bunx`, and `ty` pass through unchanged. `uv` generally passes through too, except for `uv init`, which is blocked in the default existing-project workflow.
+`rg`, `bun`, `bunx`, and `ty` pass through unchanged. `uvx` generally passes through too, except when it launches a blocked type checker such as `uvx mypy`. `uv` generally passes through too, except for `uv init` and `uv` invocations that directly launch a blocked type checker such as `uv run mypy`.
 
 ### Do I still need `AGENTS.md` if hooks are enabled?
 

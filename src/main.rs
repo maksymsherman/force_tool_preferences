@@ -14,7 +14,7 @@ const GREP_MESSAGE: &str = "Use rg (ripgrep) instead of grep in this project. Re
 const PYTHON_MESSAGE: &str = "Use uv instead of bare Python or pip commands in this project. Replace the blocked command with 'uv run ...', 'uv add ...', 'uv add --dev ...', 'uv remove ...', or 'uv run --with ...' as appropriate.";
 const UV_INIT_MESSAGE: &str = "Do not run 'uv init' in an existing project unless the user explicitly asks for project creation or conversion. Inspect the repo first and prefer 'uv run', 'uv add', 'uv sync', or 'uv run --with'. If project initialization is truly needed, use 'uv init --no-readme --no-workspace' to avoid overwriting existing files and git history.";
 const BUN_MESSAGE: &str = "Use bun instead of npm or npx in this project. Replace blocked commands with 'bun install', 'bun add', 'bun remove', 'bun run', 'bunx', 'bun create', 'bun publish', 'bun update', or 'bun outdated' when the mapping is exact. If an npm or npx flag does not have a guaranteed Bun equivalent, translate it manually instead of guessing.";
-const TY_MESSAGE: &str = "Use ty for Python type checking in this project. Replace blocked type-checker commands with 'ty check ...' when the mapping is exact. If a flag is tool-specific or changes semantics, translate it manually after checking 'ty check --help' instead of guessing.";
+const TY_MESSAGE: &str = "Use ty for Python type checking in this project. Replace blocked type-checker commands with 'ty check ...' when the mapping is exact, preserving uv or uvx wrappers when they define the execution environment. If a flag is tool-specific or changes semantics, translate it manually after checking 'ty check --help' instead of guessing.";
 const INSTALL_SH_SOURCE: &str = include_str!("../install.sh");
 const SHARED_RULE_CATALOG_BEGIN: &str = "# BEGIN_SHARED_RULE_CATALOG";
 const SHARED_RULE_CATALOG_END: &str = "# END_SHARED_RULE_CATALOG";
@@ -984,7 +984,7 @@ fn build_uvx_type_checker_decision(
     };
 
     Some(
-        match rewrite_uv_wrapper_type_checker_to_ty(tokens, command_index, target_index, kind) {
+        match rewrite_uv_wrapper_type_checker_to_ty(tokens, target_index, kind) {
             TypeCheckerRewrite::Exact(suggestion) => BlockDecision::new(
                 into_exact_suggestion_message(rule_spec(RuleId::Ty).guidance, suggestion),
             ),
@@ -1945,7 +1945,6 @@ fn rewrite_python_module_type_checker_to_ty(
 
 fn rewrite_uv_wrapper_type_checker_to_ty(
     tokens: &[ParsedToken<'_>],
-    command_index: usize,
     target_index: usize,
     kind: TypeCheckerKind,
 ) -> TypeCheckerRewrite {
@@ -1957,18 +1956,16 @@ fn rewrite_uv_wrapper_type_checker_to_ty(
         };
     }
 
-    let consumed = target_index - command_index + 1;
     TypeCheckerRewrite::Exact(replace_command(
         tokens,
-        command_index,
-        consumed,
+        target_index,
+        1,
         &["ty", "check"],
     ))
 }
 
 fn rewrite_uv_wrapper_python_module_type_checker_to_ty(
     tokens: &[ParsedToken<'_>],
-    command_index: usize,
     module_index: usize,
     kind: TypeCheckerKind,
 ) -> TypeCheckerRewrite {
@@ -1980,11 +1977,13 @@ fn rewrite_uv_wrapper_python_module_type_checker_to_ty(
         };
     }
 
-    let consumed = module_index - command_index + 1;
+    let python_index = module_index
+        .checked_sub(2)
+        .expect("python -m module rewrites require the python token");
     TypeCheckerRewrite::Exact(replace_command(
         tokens,
-        command_index,
-        consumed,
+        python_index,
+        3,
         &["ty", "check"],
     ))
 }
@@ -2032,7 +2031,7 @@ fn build_uv_type_checker_decision(
 
 fn rewrite_uv_run_type_checker_to_ty(
     tokens: &[ParsedToken<'_>],
-    command_index: usize,
+    _command_index: usize,
     run_index: usize,
 ) -> Option<TypeCheckerRewrite> {
     let mut wrapper_items = Vec::new();
@@ -2088,14 +2087,9 @@ fn rewrite_uv_run_type_checker_to_ty(
     }
 
     Some(if target == b"python" {
-        rewrite_uv_wrapper_python_module_type_checker_to_ty(
-            tokens,
-            command_index,
-            target_index + 2,
-            kind,
-        )
+        rewrite_uv_wrapper_python_module_type_checker_to_ty(tokens, target_index + 2, kind)
     } else {
-        rewrite_uv_wrapper_type_checker_to_ty(tokens, command_index, target_index, kind)
+        rewrite_uv_wrapper_type_checker_to_ty(tokens, target_index, kind)
     })
 }
 
@@ -3460,14 +3454,17 @@ mod tests {
         assert!(ty_only_python_module.contains("ty check ."));
 
         let uv_run = decision_message_with_rules("uv run mypy .", RuleSet::only(RuleId::Ty));
-        assert!(uv_run.contains("ty check ."));
+        assert!(uv_run.contains("Suggested replacement:\n  uv run ty check ."));
+        assert!(!uv_run.contains("Suggested replacement:\n  ty check ."));
 
         let uv_run_python =
             decision_message_with_rules("uv run python -m mypy .", RuleSet::only(RuleId::Ty));
-        assert!(uv_run_python.contains("ty check ."));
+        assert!(uv_run_python.contains("Suggested replacement:\n  uv run ty check ."));
+        assert!(!uv_run_python.contains("Suggested replacement:\n  ty check ."));
 
         let uvx = decision_message_with_rules("uvx mypy .", RuleSet::only(RuleId::Ty));
-        assert!(uvx.contains("ty check ."));
+        assert!(uvx.contains("Suggested replacement:\n  uvx ty check ."));
+        assert!(!uvx.contains("Suggested replacement:\n  ty check ."));
     }
 
     #[test]
