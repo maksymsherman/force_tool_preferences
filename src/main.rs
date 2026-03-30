@@ -2695,7 +2695,47 @@ fn uv_option_takes_value(token: &[u8]) -> bool {
 }
 
 fn classify_token(token: &[u8]) -> TokenKind {
+    match token {
+        b"rg" | b"ripgrep" => return TokenKind::Allowed(AllowedCommand::Rg),
+        b"uv" => return TokenKind::Allowed(AllowedCommand::Uv),
+        b"uvx" => return TokenKind::Allowed(AllowedCommand::Uvx),
+        b"bun" => return TokenKind::Allowed(AllowedCommand::Bun),
+        b"bunx" => return TokenKind::Allowed(AllowedCommand::Bunx),
+        b"ty" => return TokenKind::Allowed(AllowedCommand::Ty),
+        b"sudo" => return TokenKind::Wrapper(WrapperKind::Sudo),
+        b"env" => return TokenKind::Wrapper(WrapperKind::Env),
+        b"command" => return TokenKind::Wrapper(WrapperKind::Command),
+        b"nohup" => return TokenKind::Wrapper(WrapperKind::Nohup),
+        b"time" => return TokenKind::Wrapper(WrapperKind::Time),
+        b"builtin" => return TokenKind::Wrapper(WrapperKind::Builtin),
+        b"grep" => return TokenKind::Blocked(BlockedCommand::Grep(GrepKind::Grep)),
+        b"egrep" => return TokenKind::Blocked(BlockedCommand::Grep(GrepKind::Egrep)),
+        b"fgrep" => return TokenKind::Blocked(BlockedCommand::Grep(GrepKind::Fgrep)),
+        b"python" => return TokenKind::Blocked(BlockedCommand::Python),
+        b"pip" => return TokenKind::Blocked(BlockedCommand::Pip),
+        b"npm" => return TokenKind::Blocked(BlockedCommand::Npm),
+        b"npx" => return TokenKind::Blocked(BlockedCommand::Npx),
+        b"mypy" => return TokenKind::Blocked(BlockedCommand::TypeChecker(TypeCheckerKind::Mypy)),
+        b"pyright" => {
+            return TokenKind::Blocked(BlockedCommand::TypeChecker(TypeCheckerKind::Pyright))
+        }
+        b"basedpyright" => {
+            return TokenKind::Blocked(BlockedCommand::TypeChecker(TypeCheckerKind::BasedPyright))
+        }
+        _ => {}
+    }
+
+    if is_python_name(token) {
+        return TokenKind::Blocked(BlockedCommand::Python);
+    }
+
+    if is_pip_name(token) {
+        return TokenKind::Blocked(BlockedCommand::Pip);
+    }
+
     match normalized_program_name(token) {
+        name if is_python_name(name) => TokenKind::Blocked(BlockedCommand::Python),
+        name if is_pip_name(name) => TokenKind::Blocked(BlockedCommand::Pip),
         b"rg" | b"ripgrep" => TokenKind::Allowed(AllowedCommand::Rg),
         b"uv" => TokenKind::Allowed(AllowedCommand::Uv),
         b"uvx" => TokenKind::Allowed(AllowedCommand::Uvx),
@@ -2711,8 +2751,6 @@ fn classify_token(token: &[u8]) -> TokenKind {
         b"grep" => TokenKind::Blocked(BlockedCommand::Grep(GrepKind::Grep)),
         b"egrep" => TokenKind::Blocked(BlockedCommand::Grep(GrepKind::Egrep)),
         b"fgrep" => TokenKind::Blocked(BlockedCommand::Grep(GrepKind::Fgrep)),
-        name if is_python_name(name) => TokenKind::Blocked(BlockedCommand::Python),
-        name if is_pip_name(name) => TokenKind::Blocked(BlockedCommand::Pip),
         b"npm" => TokenKind::Blocked(BlockedCommand::Npm),
         b"npx" => TokenKind::Blocked(BlockedCommand::Npx),
         b"mypy" => TokenKind::Blocked(BlockedCommand::TypeChecker(TypeCheckerKind::Mypy)),
