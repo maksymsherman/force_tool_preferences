@@ -691,17 +691,24 @@ fn parse_command_from_state<'a>(
                 command,
                 index,
                 &mut state.token_start,
+                &mut state.token_started,
                 &mut state.value,
                 &mut state.tokens,
             ),
             b'\'' => {
-                let start = ensure_token_start(&mut state.token_start, index);
-                ensure_owned_value(command, *start, index, &mut state.value);
+                if !state.token_started {
+                    state.token_start = index;
+                    state.token_started = true;
+                }
+                ensure_owned_value(command, state.token_start, index, &mut state.value);
                 state.in_single_quote = true;
             }
             b'"' => {
-                let start = ensure_token_start(&mut state.token_start, index);
-                ensure_owned_value(command, *start, index, &mut state.value);
+                if !state.token_started {
+                    state.token_start = index;
+                    state.token_started = true;
+                }
+                ensure_owned_value(command, state.token_start, index, &mut state.value);
                 state.in_double_quote = true;
             }
             b';' => {
@@ -709,6 +716,7 @@ fn parse_command_from_state<'a>(
                     command,
                     index,
                     &mut state.token_start,
+                    &mut state.token_started,
                     &mut state.value,
                     &mut state.tokens,
                 );
@@ -721,6 +729,7 @@ fn parse_command_from_state<'a>(
                     command,
                     index,
                     &mut state.token_start,
+                    &mut state.token_started,
                     &mut state.value,
                     &mut state.tokens,
                 );
@@ -732,8 +741,11 @@ fn parse_command_from_state<'a>(
                 }
             }
             b'\\' => {
-                let start = ensure_token_start(&mut state.token_start, index);
-                let value = ensure_owned_value(command, *start, index, &mut state.value);
+                if !state.token_started {
+                    state.token_start = index;
+                    state.token_started = true;
+                }
+                let value = ensure_owned_value(command, state.token_start, index, &mut state.value);
                 if index + 1 < bytes.len() {
                     index += 1;
                     value.push(bytes[index]);
@@ -742,7 +754,10 @@ fn parse_command_from_state<'a>(
                 }
             }
             _ => {
-                ensure_token_start(&mut state.token_start, index);
+                if !state.token_started {
+                    state.token_start = index;
+                    state.token_started = true;
+                }
                 if let Some(value) = state.value.as_mut() {
                     value.push(byte);
                 }
@@ -756,6 +771,7 @@ fn parse_command_from_state<'a>(
         command,
         bytes.len(),
         &mut state.token_start,
+        &mut state.token_started,
         &mut state.value,
         &mut state.tokens,
     );
@@ -769,7 +785,8 @@ enum SimpleCommandOutcome<'a> {
 
 struct CommandParseState<'a> {
     tokens: TokenBuffer<'a>,
-    token_start: Option<usize>,
+    token_start: usize,
+    token_started: bool,
     value: Option<Vec<u8>>,
     in_single_quote: bool,
     in_double_quote: bool,
@@ -780,7 +797,8 @@ impl<'a> CommandParseState<'a> {
     fn new() -> Self {
         Self {
             tokens: TokenBuffer::new(),
-            token_start: None,
+            token_start: 0,
+            token_started: false,
             value: None,
             in_single_quote: false,
             in_double_quote: false,
@@ -796,12 +814,13 @@ fn try_evaluate_simple_command(command: &str, rules: RuleSet) -> SimpleCommandOu
     for (index, byte) in bytes.iter().copied().enumerate() {
         match byte {
             b' ' => {
-                if let Some(start) = state.token_start.take() {
-                    let raw = &command[start..index];
+                if state.token_started {
+                    let raw = &command[state.token_start..index];
                     state.tokens.push(ParsedToken {
                         raw,
                         value: Cow::Borrowed(raw.as_bytes()),
                     });
+                    state.token_started = false;
                 }
             }
             b'\'' | b'"' | b'\\' | b';' | b'|' | b'&' | b'\n' | b'\r' | b'\t' => {
@@ -809,13 +828,16 @@ fn try_evaluate_simple_command(command: &str, rules: RuleSet) -> SimpleCommandOu
                 return SimpleCommandOutcome::Continue(state);
             }
             _ => {
-                ensure_token_start(&mut state.token_start, index);
+                if !state.token_started {
+                    state.token_start = index;
+                    state.token_started = true;
+                }
             }
         }
     }
 
-    if let Some(start) = state.token_start {
-        let raw = &command[start..];
+    if state.token_started {
+        let raw = &command[state.token_start..];
         state.tokens.push(ParsedToken {
             raw,
             value: Cow::Borrowed(raw.as_bytes()),
@@ -846,28 +868,20 @@ fn ensure_owned_value<'a, 'b>(
     value.as_mut().expect("value must be initialized")
 }
 
-fn ensure_token_start(token_start: &mut Option<usize>, index: usize) -> &mut usize {
-    if token_start.is_none() {
-        *token_start = Some(index);
-    }
-
-    token_start
-        .as_mut()
-        .expect("token start must be initialized")
-}
-
 fn flush_parsed_token<'a>(
     command: &'a str,
     token_end: usize,
-    token_start: &mut Option<usize>,
+    token_start: &mut usize,
+    token_started: &mut bool,
     value: &mut Option<Vec<u8>>,
     tokens: &mut TokenBuffer<'a>,
 ) {
-    let Some(start) = token_start.take() else {
+    if !*token_started {
         return;
-    };
+    }
+    *token_started = false;
 
-    let raw = &command[start..token_end];
+    let raw = &command[*token_start..token_end];
     let value = match value.take() {
         Some(value) => Cow::Owned(value),
         None => Cow::Borrowed(raw.as_bytes()),
