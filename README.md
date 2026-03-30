@@ -14,6 +14,7 @@ grep / egrep / fgrep   python / pip / uv init   npm / npx
 
 <div align="center">
 
+[![CI](https://github.com/maksymsherman/force_tool_preferences/actions/workflows/ci.yml/badge.svg)](https://github.com/maksymsherman/force_tool_preferences/actions/workflows/ci.yml)
 [![Rust 2021](https://img.shields.io/badge/Rust-2021-orange?logo=rust)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![ripgrep First](https://img.shields.io/badge/search-rg%20first-cc5500)](https://github.com/BurntSushi/ripgrep)
@@ -158,72 +159,6 @@ Suggested replacement:
 {"decision":"block","reason":"Use rg (ripgrep) instead of grep in this project. Replace blocked grep commands with the least invasive exact rg rewrite when the flag mapping is clear. If a flag does not have a guaranteed direct rg translation, translate it manually instead of guessing.\nSuggested replacement:\n  rg TODO ."}
 ```
 
-## Current Shipped Rules
-
-### grep-family -> `rg`
-
-Blocked commands:
-
-- `grep`
-- `egrep`
-- `fgrep`
-
-High-confidence rewrites stay small:
-
-- `grep -rn pattern .` -> `rg pattern .`
-- `grep -E 'foo|bar' file.txt` -> `rg 'foo|bar' file.txt`
-- `fgrep literal file.txt` -> `rg -F literal file.txt`
-- `sudo grep -rl TODO /var/log` -> `sudo rg -l TODO /var/log`
-
-If a flag does not have a guaranteed direct `rg` translation, the command is blocked and the flagged options are listed explicitly.
-
-### python-family -> `uv`
-
-Blocked commands:
-
-- bare `python`
-- bare `python3`, `python3.11`, and similar versioned `python*` executables
-- bare `pip`
-- bare `pip3`, `pip3.12`, and similar versioned `pip*` executables
-- `uv init` in an existing-project workflow
-
-Typical outcomes:
-
-- `python script.py` -> `uv run python script.py`
-- `python -m pytest` -> `uv run python -m pytest`
-- `pip list` -> `uv pip list`
-- `pip install requests` -> `uv add requests` or `uv pip install requests`
-- `pip uninstall requests` -> `uv remove requests` or `uv pip uninstall requests`
-- `uv init` -> blocked with guidance toward `uv run`, `uv add`, `uv sync`, or `uv run --with`
-
-### npm/npx-family -> `bun`
-
-Blocked commands:
-
-- `npm`
-- `npx`
-
-Typical outcomes:
-
-- `npm install` -> `bun install`
-- `npm install react` -> `bun add react`
-- `npm install --save-dev typescript` -> `bun add -d typescript`
-- `npm ci` -> `bun install --frozen-lockfile`
-- `npm uninstall react` -> `bun remove react`
-- `npm run dev` -> `bun run dev`
-- `npm test` -> `bun run test`
-- `npm start` -> `bun run start`
-- `npm init` -> `bun init`
-- `npm link` -> `bun link`
-- `npm exec vite -- --host` -> `bun vite -- --host`
-- `npm create vite@latest app` -> `bun create vite@latest app`
-- `npm publish dist` -> `bun publish dist`
-- `npm update --latest vite` -> `bun update --latest vite`
-- `npm pack` -> `bun pm pack`
-- `npx prettier .` -> `bunx prettier .`
-
-If the npm or npx command shape depends on npm-only flags or on a package-vs-binary distinction that is not obvious, the command is blocked and you are told to translate it manually instead of guessing.
-
 ## Design Philosophy
 
 ### 1. One Hook Boundary, Multiple Policies
@@ -253,53 +188,6 @@ If `rg` flag semantics are unclear or a `pip` command could mean two different t
 ### 7. Guidance and Enforcement Are Separate
 
 `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` can teach preferred tool choices before a command runs. The binary enforces those choices when a shell command is actually about to execute.
-
-## Performance
-
-`force_tool_preferences` is intended to stay enabled in the hook path, so there are two numbers that matter:
-
-1. The evaluator cost inside an already-running process
-2. The actual wall time of invoking the hook as a subprocess
-
-### Evaluator Cost
-
-Sample measurements from this repo on one machine with a release build of `enforce-tool-preferences-command`:
-
-| Case | Example input | Average per evaluation |
-|---|---|---:|
-| Allowed `rg` command | `rg TODO .` | `0.0831 us` |
-| Allowed `uv` command | `uv run pytest` | `0.1223 us` |
-| Blocked grep-family command | `grep -rn TODO .` | `0.4861 us` |
-| Blocked python-family command | `python -m pytest` | `0.4750 us` |
-
-Reproduce locally:
-
-```sh
-cargo build --release
-
-./target/release/enforce-tool-preferences-command \
-  --benchmark-command 'rg TODO .' \
-  --iterations 5000000 \
-  --rules rg,uv,bun
-
-./target/release/enforce-tool-preferences-command \
-  --benchmark-command 'python -m pytest' \
-  --iterations 5000000 \
-  --rules rg,uv,bun
-```
-
-### Practical Hook Wall Time
-
-Warm-cache sample measurements from this repo on one machine, estimated by batching 200 invocations and dividing total wall time back down to a per-hook figure:
-
-| Path | Example input | Approximate wall time per hook |
-|---|---|---:|
-| Direct CLI allow | `--command 'rg TODO .'` | `6.533 ms` |
-| Direct CLI block | `--command 'grep -rn TODO .'` | `6.642 ms` |
-| Stdin command block | `--stdin-command` with `grep -rn TODO .` | `7.044 ms` |
-| Codex hook JSON block | `--codex-hook-json` with `python -m pytest` | `7.013 ms` |
-
-The overall pattern matches the split repos: evaluator work is effectively free, while subprocess startup, CLI parsing, stdin handling, and JSON handling dominate the real hook cost.
 
 ## Comparison
 
@@ -529,6 +417,72 @@ Expected behavior:
 - blocked direct CLI calls exit with status `2`
 - hook JSON modes emit the block payload expected by the runtime
 - allowed commands exit `0` without output
+
+## Current Shipped Rules
+
+### grep-family -> `rg`
+
+Blocked commands:
+
+- `grep`
+- `egrep`
+- `fgrep`
+
+High-confidence rewrites stay small:
+
+- `grep -rn pattern .` -> `rg pattern .`
+- `grep -E 'foo|bar' file.txt` -> `rg 'foo|bar' file.txt`
+- `fgrep literal file.txt` -> `rg -F literal file.txt`
+- `sudo grep -rl TODO /var/log` -> `sudo rg -l TODO /var/log`
+
+If a flag does not have a guaranteed direct `rg` translation, the command is blocked and the flagged options are listed explicitly.
+
+### python-family -> `uv`
+
+Blocked commands:
+
+- bare `python`
+- bare `python3`, `python3.11`, and similar versioned `python*` executables
+- bare `pip`
+- bare `pip3`, `pip3.12`, and similar versioned `pip*` executables
+- `uv init` in an existing-project workflow
+
+Typical outcomes:
+
+- `python script.py` -> `uv run python script.py`
+- `python -m pytest` -> `uv run python -m pytest`
+- `pip list` -> `uv pip list`
+- `pip install requests` -> `uv add requests` or `uv pip install requests`
+- `pip uninstall requests` -> `uv remove requests` or `uv pip uninstall requests`
+- `uv init` -> blocked with guidance toward `uv run`, `uv add`, `uv sync`, or `uv run --with`
+
+### npm/npx-family -> `bun`
+
+Blocked commands:
+
+- `npm`
+- `npx`
+
+Typical outcomes:
+
+- `npm install` -> `bun install`
+- `npm install react` -> `bun add react`
+- `npm install --save-dev typescript` -> `bun add -d typescript`
+- `npm ci` -> `bun install --frozen-lockfile`
+- `npm uninstall react` -> `bun remove react`
+- `npm run dev` -> `bun run dev`
+- `npm test` -> `bun run test`
+- `npm start` -> `bun run start`
+- `npm init` -> `bun init`
+- `npm link` -> `bun link`
+- `npm exec vite -- --host` -> `bun vite -- --host`
+- `npm create vite@latest app` -> `bun create vite@latest app`
+- `npm publish dist` -> `bun publish dist`
+- `npm update --latest vite` -> `bun update --latest vite`
+- `npm pack` -> `bun pm pack`
+- `npx prettier .` -> `bunx prettier .`
+
+If the npm or npx command shape depends on npm-only flags or on a package-vs-binary distinction that is not obvious, the command is blocked and you are told to translate it manually instead of guessing.
 
 ## Command Reference
 
@@ -843,6 +797,53 @@ Data flow summary:
 5. The rule dispatcher evaluates only the enabled families from `--rules`.
 6. Safe rewrites are rendered directly; ambiguous cases are blocked with guidance.
 7. Allowed commands exit cleanly; hook modes emit the format their runtime expects.
+
+## Performance
+
+`force_tool_preferences` is intended to stay enabled in the hook path, so there are two numbers that matter:
+
+1. The evaluator cost inside an already-running process
+2. The actual wall time of invoking the hook as a subprocess
+
+### Evaluator Cost
+
+Sample measurements from this repo on one machine with a release build of `enforce-tool-preferences-command`:
+
+| Case | Example input | Average per evaluation |
+|---|---|---:|
+| Allowed `rg` command | `rg TODO .` | `0.0831 us` |
+| Allowed `uv` command | `uv run pytest` | `0.1223 us` |
+| Blocked grep-family command | `grep -rn TODO .` | `0.4861 us` |
+| Blocked python-family command | `python -m pytest` | `0.4750 us` |
+
+Reproduce locally:
+
+```sh
+cargo build --release
+
+./target/release/enforce-tool-preferences-command \
+  --benchmark-command 'rg TODO .' \
+  --iterations 5000000 \
+  --rules rg,uv,bun
+
+./target/release/enforce-tool-preferences-command \
+  --benchmark-command 'python -m pytest' \
+  --iterations 5000000 \
+  --rules rg,uv,bun
+```
+
+### Practical Hook Wall Time
+
+Warm-cache sample measurements from this repo on one machine, estimated by batching 200 invocations and dividing total wall time back down to a per-hook figure:
+
+| Path | Example input | Approximate wall time per hook |
+|---|---|---:|
+| Direct CLI allow | `--command 'rg TODO .'` | `6.533 ms` |
+| Direct CLI block | `--command 'grep -rn TODO .'` | `6.642 ms` |
+| Stdin command block | `--stdin-command` with `grep -rn TODO .` | `7.044 ms` |
+| Codex hook JSON block | `--codex-hook-json` with `python -m pytest` | `7.013 ms` |
+
+The overall pattern matches the split repos: evaluator work is effectively free, while subprocess startup, CLI parsing, stdin handling, and JSON handling dominate the real hook cost.
 
 ## Troubleshooting
 
