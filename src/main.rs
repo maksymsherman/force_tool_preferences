@@ -2270,17 +2270,24 @@ fn push_command_part(output: &mut String, part: &str, needs_space: &mut bool) {
 }
 
 fn format_exact_suggestion(base: &str, suggestion: &str) -> String {
-    format!("{base}\nSuggested replacement:\n  {suggestion}")
+    let mut message =
+        String::with_capacity(base.len() + EXACT_SUGGESTION_PREFIX.len() + suggestion.len());
+    message.push_str(base);
+    message.push_str(EXACT_SUGGESTION_PREFIX);
+    message.push_str(suggestion);
+    message
 }
 
-fn into_exact_suggestion_message(base: &str, mut suggestion: String) -> String {
-    const EXACT_SUGGESTION_PREFIX: &str = "\nSuggested replacement:\n  ";
-
-    suggestion.reserve(base.len() + EXACT_SUGGESTION_PREFIX.len());
-    suggestion.insert_str(0, EXACT_SUGGESTION_PREFIX);
-    suggestion.insert_str(0, base);
-    suggestion
+fn into_exact_suggestion_message(base: &str, suggestion: String) -> String {
+    let mut message =
+        String::with_capacity(base.len() + EXACT_SUGGESTION_PREFIX.len() + suggestion.len());
+    message.push_str(base);
+    message.push_str(EXACT_SUGGESTION_PREFIX);
+    message.push_str(&suggestion);
+    message
 }
+
+const EXACT_SUGGESTION_PREFIX: &str = "\nSuggested replacement:\n  ";
 
 fn format_alternative_suggestions(
     base: &str,
