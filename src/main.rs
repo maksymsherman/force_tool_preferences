@@ -800,7 +800,7 @@ fn try_evaluate_simple_command(command: &str, rules: RuleSet) -> SimpleCommandOu
                     let raw = &command[start..index];
                     state.tokens.push(ParsedToken {
                         raw,
-                        value: Cow::Borrowed(raw),
+                        value: Cow::Borrowed(raw.as_bytes()),
                     });
                 }
             }
@@ -818,7 +818,7 @@ fn try_evaluate_simple_command(command: &str, rules: RuleSet) -> SimpleCommandOu
         let raw = &command[start..];
         state.tokens.push(ParsedToken {
             raw,
-            value: Cow::Borrowed(raw),
+            value: Cow::Borrowed(raw.as_bytes()),
         });
     }
 
@@ -828,7 +828,7 @@ fn try_evaluate_simple_command(command: &str, rules: RuleSet) -> SimpleCommandOu
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ParsedToken<'a> {
     raw: &'a str,
-    value: Cow<'a, str>,
+    value: Cow<'a, [u8]>,
 }
 
 type TokenBuffer<'a> = SmallVec<[ParsedToken<'a>; 8]>;
@@ -855,10 +855,8 @@ fn flush_parsed_token<'a>(
 
     let raw = &command[start..token_end];
     let value = match value.take() {
-        Some(value) => {
-            Cow::Owned(String::from_utf8(value).expect("parser only collects valid UTF-8 bytes"))
-        }
-        None => Cow::Borrowed(raw),
+        Some(value) => Cow::Owned(value),
+        None => Cow::Borrowed(raw.as_bytes()),
     };
 
     tokens.push(ParsedToken { raw, value });
@@ -879,7 +877,7 @@ fn evaluate_segment(tokens: &[ParsedToken<'_>], rules: RuleSet) -> Option<BlockD
     let mut skip_next_value = false;
 
     for (index, token) in tokens.iter().enumerate() {
-        let value = token.value.as_bytes();
+        let value = token.value.as_ref();
 
         if skip_next_value {
             skip_next_value = false;
@@ -1026,9 +1024,9 @@ fn build_uvx_type_checker_decision(
 ) -> Option<BlockDecision> {
     let target_index = command_index + 1;
     let kind = match tokens.get(target_index).map(|token| token.value.as_ref()) {
-        Some(value) if value.eq_ignore_ascii_case("mypy") => TypeCheckerKind::Mypy,
-        Some(value) if value.eq_ignore_ascii_case("pyright") => TypeCheckerKind::Pyright,
-        Some(value) if value.eq_ignore_ascii_case("basedpyright") => TypeCheckerKind::BasedPyright,
+        Some(value) if value.eq_ignore_ascii_case(b"mypy") => TypeCheckerKind::Mypy,
+        Some(value) if value.eq_ignore_ascii_case(b"pyright") => TypeCheckerKind::Pyright,
+        Some(value) if value.eq_ignore_ascii_case(b"basedpyright") => TypeCheckerKind::BasedPyright,
         _ => return None,
     };
 
@@ -1058,12 +1056,12 @@ fn build_python_type_checker_decision(
     else {
         return None;
     };
-    if module_flag != "-m" {
+    if module_flag != b"-m" {
         return None;
     }
 
     let module_index = command_index + 2;
-    let module_name = normalized_program_name(tokens.get(module_index)?.value.as_bytes());
+    let module_name = normalized_program_name(tokens.get(module_index)?.value.as_ref());
     let kind = match module_name {
         b"mypy" => TypeCheckerKind::Mypy,
         b"pyright" => TypeCheckerKind::Pyright,
@@ -1095,7 +1093,7 @@ fn evaluate_uv_command(
     let mut skip_next_value = false;
 
     for (offset, token) in tokens[command_index + 1..].iter().enumerate() {
-        let value = token.value.as_bytes();
+        let value = token.value.as_ref();
 
         if skip_next_value {
             skip_next_value = false;
@@ -1147,11 +1145,11 @@ fn render_pip_decision(tokens: &[ParsedToken<'_>], command_index: usize) -> Stri
         return format_exact_suggestion(rule_spec(RuleId::Uv).guidance, &pip_rewrite);
     };
 
-    if subcommand.eq_ignore_ascii_case("install") {
+    if subcommand.eq_ignore_ascii_case(b"install") {
         return render_pip_install_decision(tokens, command_index, pip_rewrite);
     }
 
-    if subcommand.eq_ignore_ascii_case("uninstall") {
+    if subcommand.eq_ignore_ascii_case(b"uninstall") {
         return render_pip_uninstall_decision(tokens, command_index, pip_rewrite);
     }
 
@@ -1214,7 +1212,7 @@ fn render_npm_decision(tokens: &[ParsedToken<'_>], command_index: usize) -> Stri
     };
 
     let subcommand = subcommand_token.value.as_ref();
-    if subcommand.starts_with('-') {
+    if subcommand.starts_with(b"-") {
         return format_bun_manual_translation_message(
             rule_spec(RuleId::Bun).guidance,
             &[subcommand_token.raw.to_string()],
@@ -1222,7 +1220,7 @@ fn render_npm_decision(tokens: &[ParsedToken<'_>], command_index: usize) -> Stri
         );
     }
 
-    if subcommand.eq_ignore_ascii_case("install") || subcommand.eq_ignore_ascii_case("i") {
+    if subcommand.eq_ignore_ascii_case(b"install") || subcommand.eq_ignore_ascii_case(b"i") {
         return match rewrite_npm_install_to_bun(tokens, command_index) {
             BunRewrite::Exact(suggestion) => {
                 into_exact_suggestion_message(rule_spec(RuleId::Bun).guidance, suggestion)
@@ -1244,7 +1242,7 @@ fn render_npm_decision(tokens: &[ParsedToken<'_>], command_index: usize) -> Stri
         };
     }
 
-    if subcommand.eq_ignore_ascii_case("run") || subcommand.eq_ignore_ascii_case("run-script") {
+    if subcommand.eq_ignore_ascii_case(b"run") || subcommand.eq_ignore_ascii_case(b"run-script") {
         return match rewrite_npm_run_to_bun(tokens, command_index) {
             BunRewrite::Exact(suggestion) => {
                 into_exact_suggestion_message(rule_spec(RuleId::Bun).guidance, suggestion)
@@ -1255,7 +1253,7 @@ fn render_npm_decision(tokens: &[ParsedToken<'_>], command_index: usize) -> Stri
         };
     }
 
-    if subcommand.eq_ignore_ascii_case("exec") {
+    if subcommand.eq_ignore_ascii_case(b"exec") {
         return match rewrite_npm_exec_to_bun(tokens, command_index) {
             BunRewrite::Exact(suggestion) => {
                 into_exact_suggestion_message(rule_spec(RuleId::Bun).guidance, suggestion)
@@ -1266,7 +1264,7 @@ fn render_npm_decision(tokens: &[ParsedToken<'_>], command_index: usize) -> Stri
         };
     }
 
-    if subcommand.eq_ignore_ascii_case("create") {
+    if subcommand.eq_ignore_ascii_case(b"create") {
         return match rewrite_npm_create_to_bun(tokens, command_index) {
             BunRewrite::Exact(suggestion) => {
                 into_exact_suggestion_message(rule_spec(RuleId::Bun).guidance, suggestion)
@@ -1277,7 +1275,7 @@ fn render_npm_decision(tokens: &[ParsedToken<'_>], command_index: usize) -> Stri
         };
     }
 
-    if subcommand.eq_ignore_ascii_case("publish") {
+    if subcommand.eq_ignore_ascii_case(b"publish") {
         return match rewrite_npm_publish_to_bun(tokens, command_index) {
             BunRewrite::Exact(suggestion) => {
                 into_exact_suggestion_message(rule_spec(RuleId::Bun).guidance, suggestion)
@@ -1288,7 +1286,7 @@ fn render_npm_decision(tokens: &[ParsedToken<'_>], command_index: usize) -> Stri
         };
     }
 
-    if subcommand.eq_ignore_ascii_case("update") || subcommand.eq_ignore_ascii_case("upgrade") {
+    if subcommand.eq_ignore_ascii_case(b"update") || subcommand.eq_ignore_ascii_case(b"upgrade") {
         return match rewrite_npm_update_to_bun(tokens, command_index) {
             BunRewrite::Exact(suggestion) => {
                 into_exact_suggestion_message(rule_spec(RuleId::Bun).guidance, suggestion)
@@ -1299,7 +1297,7 @@ fn render_npm_decision(tokens: &[ParsedToken<'_>], command_index: usize) -> Stri
         };
     }
 
-    if subcommand.eq_ignore_ascii_case("outdated") {
+    if subcommand.eq_ignore_ascii_case(b"outdated") {
         return match rewrite_npm_outdated_to_bun(tokens, command_index) {
             BunRewrite::Exact(suggestion) => {
                 into_exact_suggestion_message(rule_spec(RuleId::Bun).guidance, suggestion)
@@ -1310,7 +1308,7 @@ fn render_npm_decision(tokens: &[ParsedToken<'_>], command_index: usize) -> Stri
         };
     }
 
-    if subcommand.eq_ignore_ascii_case("pack") {
+    if subcommand.eq_ignore_ascii_case(b"pack") {
         return match rewrite_npm_pack_to_bun(tokens, command_index) {
             BunRewrite::Exact(suggestion) => {
                 into_exact_suggestion_message(rule_spec(RuleId::Bun).guidance, suggestion)
@@ -1321,7 +1319,7 @@ fn render_npm_decision(tokens: &[ParsedToken<'_>], command_index: usize) -> Stri
         };
     }
 
-    if subcommand.eq_ignore_ascii_case("ci") {
+    if subcommand.eq_ignore_ascii_case(b"ci") {
         return match rewrite_npm_ci_to_bun(tokens, command_index) {
             BunRewrite::Exact(suggestion) => {
                 into_exact_suggestion_message(rule_spec(RuleId::Bun).guidance, suggestion)
@@ -1344,7 +1342,7 @@ fn render_npm_decision(tokens: &[ParsedToken<'_>], command_index: usize) -> Stri
         };
     }
 
-    if subcommand.eq_ignore_ascii_case("init") {
+    if subcommand.eq_ignore_ascii_case(b"init") {
         return match rewrite_npm_init_to_bun(tokens, command_index) {
             BunRewrite::Exact(suggestion) => {
                 into_exact_suggestion_message(rule_spec(RuleId::Bun).guidance, suggestion)
@@ -1355,7 +1353,7 @@ fn render_npm_decision(tokens: &[ParsedToken<'_>], command_index: usize) -> Stri
         };
     }
 
-    if subcommand.eq_ignore_ascii_case("link") || subcommand.eq_ignore_ascii_case("ln") {
+    if subcommand.eq_ignore_ascii_case(b"link") || subcommand.eq_ignore_ascii_case(b"ln") {
         return match rewrite_npm_link_to_bun(tokens, command_index) {
             BunRewrite::Exact(suggestion) => {
                 into_exact_suggestion_message(rule_spec(RuleId::Bun).guidance, suggestion)
@@ -1404,15 +1402,15 @@ enum TypeCheckerRewrite {
     },
 }
 
-fn matches_npm_remove_subcommand(subcommand: &str) -> bool {
+fn matches_npm_remove_subcommand(subcommand: &[u8]) -> bool {
     matches!(
         subcommand,
         value
-            if value.eq_ignore_ascii_case("uninstall")
-                || value.eq_ignore_ascii_case("remove")
-                || value.eq_ignore_ascii_case("rm")
-                || value.eq_ignore_ascii_case("r")
-                || value.eq_ignore_ascii_case("un")
+            if value.eq_ignore_ascii_case(b"uninstall")
+                || value.eq_ignore_ascii_case(b"remove")
+                || value.eq_ignore_ascii_case(b"rm")
+                || value.eq_ignore_ascii_case(b"r")
+                || value.eq_ignore_ascii_case(b"un")
     )
 }
 
@@ -1427,7 +1425,7 @@ fn rewrite_npx_to_bunx(tokens: &[ParsedToken<'_>], command_index: usize) -> BunR
             continue;
         }
 
-        if value.starts_with('-') || value == "--" {
+        if value.starts_with(b"-") || value == b"--" {
             uncertain_items.push(token.raw.to_string());
             continue;
         }
@@ -1464,9 +1462,9 @@ fn rewrite_npm_install_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) 
 
     for token in args {
         let value = token.value.as_ref();
-        if value.starts_with('-') {
+        if value.starts_with(b"-") {
             match value {
-                "-D" | "--save-dev" => {
+                b"-D" | b"--save-dev" => {
                     if has_mode_flag && install_mode != NpmInstallMode::Dev {
                         uncertain_items.push(token.raw.to_string());
                     } else {
@@ -1474,7 +1472,7 @@ fn rewrite_npm_install_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) 
                         has_mode_flag = true;
                     }
                 }
-                "-O" | "--save-optional" => {
+                b"-O" | b"--save-optional" => {
                     if has_mode_flag && install_mode != NpmInstallMode::Optional {
                         uncertain_items.push(token.raw.to_string());
                     } else {
@@ -1482,7 +1480,7 @@ fn rewrite_npm_install_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) 
                         has_mode_flag = true;
                     }
                 }
-                "--save-peer" => {
+                b"--save-peer" => {
                     if has_mode_flag && install_mode != NpmInstallMode::Peer {
                         uncertain_items.push(token.raw.to_string());
                     } else {
@@ -1490,14 +1488,14 @@ fn rewrite_npm_install_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) 
                         has_mode_flag = true;
                     }
                 }
-                "-E" | "--save-exact" => {
+                b"-E" | b"--save-exact" => {
                     exact = true;
                 }
-                "-g" | "--global" => {
+                b"-g" | b"--global" => {
                     global = true;
                 }
-                "-S" | "--save" | "--save-prod" => {}
-                "--production" | "--frozen-lockfile" | "--dry-run" => {
+                b"-S" | b"--save" | b"--save-prod" => {}
+                b"--production" | b"--frozen-lockfile" | b"--dry-run" => {
                     passthrough_flags.push(token.raw.to_string());
                 }
                 _ => uncertain_items.push(token.raw.to_string()),
@@ -1603,8 +1601,8 @@ fn rewrite_npm_remove_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) -
 
     for token in args {
         let value = token.value.as_ref();
-        if value.starts_with('-') {
-            if !matches!(value, "-g" | "--global") {
+        if value.starts_with(b"-") {
+            if !matches!(value, b"-g" | b"--global") {
                 uncertain_items.push(token.raw.to_string());
             }
             continue;
@@ -1646,7 +1644,7 @@ fn rewrite_npm_run_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) -> B
             continue;
         }
 
-        if value == "--" || value.starts_with('-') {
+        if value == b"--" || value.starts_with(b"-") {
             uncertain_items.push(token.raw.to_string());
             continue;
         }
@@ -1675,7 +1673,7 @@ fn rewrite_npm_exec_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) -> 
             continue;
         }
 
-        if value == "--" || value.starts_with('-') {
+        if value == b"--" || value.starts_with(b"-") {
             uncertain_items.push(token.raw.to_string());
             continue;
         }
@@ -1711,7 +1709,7 @@ fn rewrite_npm_create_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) -
 
     for token in args {
         let value = token.value.as_ref();
-        if value == "--" || value.starts_with('-') {
+        if value == b"--" || value.starts_with(b"-") {
             uncertain_items.push(token.raw.to_string());
         } else {
             break;
@@ -1737,7 +1735,7 @@ fn rewrite_npm_publish_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) 
     let args = &tokens[command_index + 2..];
     let uncertain_items = args
         .iter()
-        .filter(|token| token.value.starts_with('-'))
+        .filter(|token| token.value.as_ref().starts_with(b"-"))
         .map(|token| token.raw.to_string())
         .collect::<Vec<_>>();
 
@@ -1760,7 +1758,9 @@ fn rewrite_npm_update_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) -
     let args = &tokens[command_index + 2..];
     let uncertain_items = args
         .iter()
-        .filter(|token| token.value.starts_with('-') && !matches!(token.value.as_ref(), "--latest"))
+        .filter(|token| {
+            token.value.as_ref().starts_with(b"-") && !matches!(token.value.as_ref(), b"--latest")
+        })
         .map(|token| token.raw.to_string())
         .collect::<Vec<_>>();
 
@@ -1823,7 +1823,7 @@ fn rewrite_npm_ci_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) -> Bu
     let args = &tokens[command_index + 2..];
     let uncertain_items = args
         .iter()
-        .filter(|token| token.value.starts_with('-'))
+        .filter(|token| token.value.as_ref().starts_with(b"-"))
         .map(|token| token.raw.to_string())
         .collect::<Vec<_>>();
 
@@ -1842,24 +1842,24 @@ fn rewrite_npm_ci_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) -> Bu
     ))
 }
 
-fn matches_npm_lifecycle_subcommand(subcommand: &str) -> bool {
-    subcommand.eq_ignore_ascii_case("test")
-        || subcommand.eq_ignore_ascii_case("t")
-        || subcommand.eq_ignore_ascii_case("tst")
-        || subcommand.eq_ignore_ascii_case("start")
-        || subcommand.eq_ignore_ascii_case("stop")
-        || subcommand.eq_ignore_ascii_case("restart")
+fn matches_npm_lifecycle_subcommand(subcommand: &[u8]) -> bool {
+    subcommand.eq_ignore_ascii_case(b"test")
+        || subcommand.eq_ignore_ascii_case(b"t")
+        || subcommand.eq_ignore_ascii_case(b"tst")
+        || subcommand.eq_ignore_ascii_case(b"start")
+        || subcommand.eq_ignore_ascii_case(b"stop")
+        || subcommand.eq_ignore_ascii_case(b"restart")
 }
 
-fn normalize_npm_lifecycle_name(subcommand: &str) -> &'static str {
-    if subcommand.eq_ignore_ascii_case("test")
-        || subcommand.eq_ignore_ascii_case("t")
-        || subcommand.eq_ignore_ascii_case("tst")
+fn normalize_npm_lifecycle_name(subcommand: &[u8]) -> &'static str {
+    if subcommand.eq_ignore_ascii_case(b"test")
+        || subcommand.eq_ignore_ascii_case(b"t")
+        || subcommand.eq_ignore_ascii_case(b"tst")
     {
         "test"
-    } else if subcommand.eq_ignore_ascii_case("start") {
+    } else if subcommand.eq_ignore_ascii_case(b"start") {
         "start"
-    } else if subcommand.eq_ignore_ascii_case("stop") {
+    } else if subcommand.eq_ignore_ascii_case(b"stop") {
         "stop"
     } else {
         "restart"
@@ -1876,10 +1876,10 @@ fn rewrite_npm_lifecycle_to_bun(
 
     for token in args {
         let value = token.value.as_ref();
-        if value == "--" {
+        if value == b"--" {
             break;
         }
-        if value.starts_with('-') {
+        if value.starts_with(b"-") {
             uncertain_items.push(token.raw.to_string());
         }
     }
@@ -1908,7 +1908,7 @@ fn rewrite_npm_init_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) -> 
 
     let all_yes = args
         .iter()
-        .all(|t| matches!(t.value.as_ref(), "-y" | "--yes"));
+        .all(|t| matches!(t.value.as_ref(), b"-y" | b"--yes"));
     if all_yes {
         return BunRewrite::Exact(replace_command(
             tokens,
@@ -1929,7 +1929,7 @@ fn rewrite_npm_link_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) -> 
     let args = &tokens[command_index + 2..];
     let uncertain_items = args
         .iter()
-        .filter(|token| token.value.starts_with('-'))
+        .filter(|token| token.value.as_ref().starts_with(b"-"))
         .map(|token| token.raw.to_string())
         .collect::<Vec<_>>();
 
@@ -2030,7 +2030,7 @@ fn rewrite_uv_wrapper_python_module_type_checker_to_ty(
 fn collect_type_checker_manual_items(tokens: &[ParsedToken<'_>]) -> Option<Vec<String>> {
     let items = tokens
         .iter()
-        .filter(|token| token.value == "--" || token.value.starts_with('-'))
+        .filter(|token| token.value.as_ref() == b"--" || token.value.as_ref().starts_with(b"-"))
         .map(|token| token.raw.to_string())
         .collect::<Vec<_>>();
 
@@ -2046,7 +2046,7 @@ fn build_uv_type_checker_decision(
     command_index: usize,
     subcommand_index: usize,
 ) -> Option<BlockDecision> {
-    let subcommand = normalized_program_name(tokens[subcommand_index].value.as_bytes());
+    let subcommand = normalized_program_name(tokens[subcommand_index].value.as_ref());
     let rewrite = match subcommand {
         b"run" => rewrite_uv_run_type_checker_to_ty(tokens, command_index, subcommand_index)?,
         b"tool" => rewrite_uv_tool_run_type_checker_to_ty(tokens, command_index, subcommand_index)?,
@@ -2083,10 +2083,10 @@ fn rewrite_uv_run_type_checker_to_ty(
             skip_next_value = false;
             continue;
         }
-        if is_shell_assignment(tokens[index].value.as_bytes()) {
+        if is_shell_assignment(tokens[index].value.as_ref()) {
             continue;
         }
-        if value == "--" || value.starts_with('-') {
+        if value == b"--" || value.starts_with(b"-") {
             wrapper_items.push(tokens[index].raw.to_string());
             skip_next_value = uv_run_option_takes_value(value);
             continue;
@@ -2096,7 +2096,7 @@ fn rewrite_uv_run_type_checker_to_ty(
     }
 
     let target_index = target_index?;
-    let target = normalized_program_name(tokens[target_index].value.as_bytes());
+    let target = normalized_program_name(tokens[target_index].value.as_ref());
 
     let kind = match target {
         b"mypy" => Some(TypeCheckerKind::Mypy),
@@ -2108,11 +2108,11 @@ fn rewrite_uv_run_type_checker_to_ty(
                 .map(|token| token.value.as_ref()),
             tokens
                 .get(target_index + 2)
-                .map(|token| normalized_program_name(token.value.as_bytes())),
+                .map(|token| normalized_program_name(token.value.as_ref())),
         ) {
-            (Some("-m"), Some(b"mypy")) => Some(TypeCheckerKind::Mypy),
-            (Some("-m"), Some(b"pyright")) => Some(TypeCheckerKind::Pyright),
-            (Some("-m"), Some(b"basedpyright")) => Some(TypeCheckerKind::BasedPyright),
+            (Some(b"-m"), Some(b"mypy")) => Some(TypeCheckerKind::Mypy),
+            (Some(b"-m"), Some(b"pyright")) => Some(TypeCheckerKind::Pyright),
+            (Some(b"-m"), Some(b"basedpyright")) => Some(TypeCheckerKind::BasedPyright),
             _ => None,
         },
         _ => None,
@@ -2139,24 +2139,24 @@ fn rewrite_uv_tool_run_type_checker_to_ty(
 ) -> Option<TypeCheckerRewrite> {
     let run_index = tool_index + 1;
     let run_token = tokens.get(run_index)?;
-    if !run_token.value.eq_ignore_ascii_case("run") {
+    if !run_token.value.eq_ignore_ascii_case(b"run") {
         return None;
     }
 
     rewrite_uv_run_type_checker_to_ty(tokens, command_index, run_index)
 }
 
-fn uv_run_option_takes_value(value: &str) -> bool {
+fn uv_run_option_takes_value(value: &[u8]) -> bool {
     matches!(
         value,
-        "--python"
-            | "-p"
-            | "--with"
-            | "--project"
-            | "--directory"
-            | "--env-file"
-            | "--python-platform"
-            | "--python-version"
+        b"--python"
+            | b"-p"
+            | b"--with"
+            | b"--project"
+            | b"--directory"
+            | b"--env-file"
+            | b"--python-platform"
+            | b"--python-version"
     )
 }
 
@@ -2203,10 +2203,10 @@ fn format_type_checker_manual_translation_message(
     message
 }
 
-fn is_simple_bun_exec_target(value: &str) -> bool {
+fn is_simple_bun_exec_target(value: &[u8]) -> bool {
     !value.is_empty()
-        && value.bytes().all(
-            |byte| matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'_' | b'-'),
+        && value.iter().all(
+            |byte| matches!(*byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'_' | b'-'),
         )
 }
 
@@ -2322,12 +2322,12 @@ fn is_high_confidence_dependency_list(tokens: &[ParsedToken<'_>]) -> bool {
             .all(|token| is_high_confidence_dependency_arg(token.value.as_ref()))
 }
 
-fn is_high_confidence_dependency_arg(value: &str) -> bool {
+fn is_high_confidence_dependency_arg(value: &[u8]) -> bool {
     !value.is_empty()
-        && !value.starts_with('-')
-        && value.bytes().all(|byte| {
+        && !value.starts_with(b"-")
+        && value.iter().all(|byte| {
             matches!(
-                byte,
+                *byte,
                 b'a'..=b'z'
                     | b'A'..=b'Z'
                     | b'0'..=b'9'
@@ -2399,18 +2399,18 @@ fn rewrite_grep_to_rg(
     for token in &tokens[command_index + 1..] {
         let val = token.value.as_ref();
 
-        if end_of_options || !val.starts_with('-') || val == "-" {
+        if end_of_options || !val.starts_with(b"-") || val == b"-" {
             push_suggestion_part(&mut suggestion, token.raw, &mut has_parts);
             continue;
         }
 
-        if val == "--" {
+        if val == b"--" {
             push_suggestion_part(&mut suggestion, token.raw, &mut has_parts);
             end_of_options = true;
             continue;
         }
 
-        if val.starts_with("--") {
+        if val.starts_with(b"--") {
             match classify_long_grep_flag(val) {
                 LongFlagResult::Drop => continue,
                 LongFlagResult::Keep(flag) => {
@@ -2484,51 +2484,56 @@ enum ShortFlagResult {
     Uncertain,
 }
 
-fn classify_long_grep_flag(flag: &str) -> LongFlagResult {
+fn classify_long_grep_flag(flag: &[u8]) -> LongFlagResult {
     match flag {
-        "--recursive" | "--line-number" | "--extended-regexp" => LongFlagResult::Drop,
-        "--fixed-strings" => LongFlagResult::NeedFixedStrings,
-        "--colour" => LongFlagResult::Keep("--color".to_string()),
-        "--ignore-case"
-        | "--invert-match"
-        | "--word-regexp"
-        | "--line-regexp"
-        | "--files-with-matches"
-        | "--files-without-match"
-        | "--count"
-        | "--only-matching"
-        | "--quiet"
-        | "--regexp"
-        | "--file"
-        | "--after-context"
-        | "--before-context"
-        | "--context"
-        | "--max-count"
-        | "--color"
-        | "--with-filename"
-        | "--no-filename" => LongFlagResult::Keep(flag.to_string()),
-        _ if flag.starts_with("--regexp=")
-            || flag.starts_with("--file=")
-            || flag.starts_with("--after-context=")
-            || flag.starts_with("--before-context=")
-            || flag.starts_with("--context=")
-            || flag.starts_with("--max-count=") =>
+        b"--recursive" | b"--line-number" | b"--extended-regexp" => LongFlagResult::Drop,
+        b"--fixed-strings" => LongFlagResult::NeedFixedStrings,
+        b"--colour" => LongFlagResult::Keep("--color".to_string()),
+        b"--ignore-case"
+        | b"--invert-match"
+        | b"--word-regexp"
+        | b"--line-regexp"
+        | b"--files-with-matches"
+        | b"--files-without-match"
+        | b"--count"
+        | b"--only-matching"
+        | b"--quiet"
+        | b"--regexp"
+        | b"--file"
+        | b"--after-context"
+        | b"--before-context"
+        | b"--context"
+        | b"--max-count"
+        | b"--color"
+        | b"--with-filename"
+        | b"--no-filename" => LongFlagResult::Keep(String::from_utf8_lossy(flag).into_owned()),
+        _ if flag.starts_with(b"--regexp=")
+            || flag.starts_with(b"--file=")
+            || flag.starts_with(b"--after-context=")
+            || flag.starts_with(b"--before-context=")
+            || flag.starts_with(b"--context=")
+            || flag.starts_with(b"--max-count=") =>
         {
-            LongFlagResult::Keep(flag.to_string())
+            LongFlagResult::Keep(String::from_utf8_lossy(flag).into_owned())
         }
-        _ if matches!(flag, "--color=auto" | "--color=always" | "--color=never") => {
-            LongFlagResult::Keep(flag.to_string())
+        _ if matches!(flag, b"--color=auto" | b"--color=always" | b"--color=never") => {
+            LongFlagResult::Keep(String::from_utf8_lossy(flag).into_owned())
         }
-        _ if matches!(flag, "--colour=auto" | "--colour=always" | "--colour=never") => {
-            LongFlagResult::Keep(flag.replacen("--colour", "--color", 1))
+        _ if matches!(
+            flag,
+            b"--colour=auto" | b"--colour=always" | b"--colour=never"
+        ) =>
+        {
+            LongFlagResult::Keep(format!(
+                "--color{}",
+                String::from_utf8_lossy(&flag[b"--colour".len()..])
+            ))
         }
         _ => LongFlagResult::Uncertain,
     }
 }
 
-fn classify_short_grep_flag(flag: &str) -> ShortFlagResult {
-    let bytes = flag.as_bytes();
-
+fn classify_short_grep_flag(bytes: &[u8]) -> ShortFlagResult {
     if bytes.len() == 2 {
         return match bytes[1] {
             b'r' | b'n' | b'E' => ShortFlagResult::Drop,
@@ -2536,14 +2541,14 @@ fn classify_short_grep_flag(flag: &str) -> ShortFlagResult {
             byte if is_safe_no_value_short_grep_flag(byte)
                 || is_safe_value_short_grep_flag(byte) =>
             {
-                ShortFlagResult::Keep(flag.to_string())
+                ShortFlagResult::Keep(String::from_utf8_lossy(bytes).into_owned())
             }
             _ => ShortFlagResult::Uncertain,
         };
     }
 
     if is_safe_attached_numeric_short_flag(bytes) {
-        return ShortFlagResult::Keep(flag.to_string());
+        return ShortFlagResult::Keep(String::from_utf8_lossy(bytes).into_owned());
     }
 
     let mut kept = None::<String>;
