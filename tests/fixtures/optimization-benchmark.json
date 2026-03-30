@@ -1,0 +1,5 @@
+{
+  "command": "FOO=1 BAR=2 env BAZ=\"two words\" python -m pyright src",
+  "iterations": 1000000,
+  "rules": "rg,uv,bun,ty"
+}

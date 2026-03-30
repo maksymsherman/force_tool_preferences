@@ -1,0 +1,47 @@
+[
+  {
+    "command": "grep -rn TODO .",
+    "rules": "rg,uv,bun,ty",
+    "expected": "Use rg (ripgrep) instead of grep in this project. Replace blocked grep commands with the least invasive exact rg rewrite when the flag mapping is clear. If a flag does not have a guaranteed direct rg translation, translate it manually instead of guessing.\nSuggested replacement:\n  rg TODO ."
+  },
+  {
+    "command": "python -m pytest",
+    "rules": "rg,uv,bun,ty",
+    "expected": "Use uv instead of bare Python or pip commands in this project. Replace the blocked command with 'uv run ...', 'uv add ...', 'uv add --dev ...', 'uv remove ...', or 'uv run --with ...' as appropriate.\nSuggested replacement:\n  uv run python -m pytest"
+  },
+  {
+    "command": "pip install requests",
+    "rules": "rg,uv,bun,ty",
+    "expected": "Use uv instead of bare Python or pip commands in this project. Replace the blocked command with 'uv run ...', 'uv add ...', 'uv add --dev ...', 'uv remove ...', or 'uv run --with ...' as appropriate.\nLikely alternatives:\n  uv add requests\n  uv pip install requests\nChoose `uv add` for project dependencies; choose `uv pip` to keep pip-style behavior."
+  },
+  {
+    "command": "npm run dev",
+    "rules": "rg,uv,bun,ty",
+    "expected": "Use bun instead of npm or npx in this project. Replace blocked commands with 'bun install', 'bun add', 'bun remove', 'bun run', 'bunx', 'bun create', 'bun publish', 'bun update', or 'bun outdated' when the mapping is exact. If an npm or npx flag does not have a guaranteed Bun equivalent, translate it manually instead of guessing.\nSuggested replacement:\n  bun run dev"
+  },
+  {
+    "command": "mypy .",
+    "rules": "rg,uv,bun,ty",
+    "expected": "Use ty for Python type checking in this project. Replace blocked type-checker commands with 'ty check ...' when the mapping is exact, preserving uv or uvx wrappers when they define the execution environment. If a flag is tool-specific or changes semantics, translate it manually after checking 'ty check --help' instead of guessing.\nSuggested replacement:\n  ty check ."
+  },
+  {
+    "command": "FOO=1 BAR=2 env BAZ=\"two words\" python -m pyright src",
+    "rules": "rg,uv,bun,ty",
+    "expected": "Use ty for Python type checking in this project. Replace blocked type-checker commands with 'ty check ...' when the mapping is exact, preserving uv or uvx wrappers when they define the execution environment. If a flag is tool-specific or changes semantics, translate it manually after checking 'ty check --help' instead of guessing.\nSuggested replacement:\n  FOO=1 BAR=2 env BAZ=\"two words\" ty check src"
+  },
+  {
+    "command": "sudo -u root grep pattern /etc/hosts",
+    "rules": "rg,uv,bun,ty",
+    "expected": "Use rg (ripgrep) instead of grep in this project. Replace blocked grep commands with the least invasive exact rg rewrite when the flag mapping is clear. If a flag does not have a guaranteed direct rg translation, translate it manually instead of guessing.\nSuggested replacement:\n  sudo -u root rg pattern /etc/hosts"
+  },
+  {
+    "command": "uv init",
+    "rules": "rg,uv,bun,ty",
+    "expected": "Do not run 'uv init' in an existing project unless the user explicitly asks for project creation or conversion. Inspect the repo first and prefer 'uv run', 'uv add', 'uv sync', or 'uv run --with'. If project initialization is truly needed, use 'uv init --no-readme --no-workspace' to avoid overwriting existing files and git history."
+  },
+  {
+    "command": "uv run pytest",
+    "rules": "rg,uv,bun,ty",
+    "expected": null
+  }
+]

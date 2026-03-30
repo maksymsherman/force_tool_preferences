@@ -140,6 +140,14 @@ enforce-tool-preferences-command \
   --rules rg,uv,bun,ty
 ```
 
+The stable hot-path fixture used by optimization passes is:
+
+```sh
+FOO=1 BAR=2 env BAZ="two words" python -m pyright src
+```
+
+The benchmark manifest lives in [`tests/fixtures/optimization-benchmark.json`](tests/fixtures/optimization-benchmark.json), and the exact-output golden corpus lives in [`tests/fixtures/evaluator-golden-cases.json`](tests/fixtures/evaluator-golden-cases.json).
+
 Representative outputs:
 
 ```text

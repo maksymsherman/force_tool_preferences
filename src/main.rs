@@ -1956,12 +1956,7 @@ fn rewrite_uv_wrapper_type_checker_to_ty(
         };
     }
 
-    TypeCheckerRewrite::Exact(replace_command(
-        tokens,
-        target_index,
-        1,
-        &["ty", "check"],
-    ))
+    TypeCheckerRewrite::Exact(replace_command(tokens, target_index, 1, &["ty", "check"]))
 }
 
 fn rewrite_uv_wrapper_python_module_type_checker_to_ty(
@@ -1980,12 +1975,7 @@ fn rewrite_uv_wrapper_python_module_type_checker_to_ty(
     let python_index = module_index
         .checked_sub(2)
         .expect("python -m module rewrites require the python token");
-    TypeCheckerRewrite::Exact(replace_command(
-        tokens,
-        python_index,
-        3,
-        &["ty", "check"],
-    ))
+    TypeCheckerRewrite::Exact(replace_command(tokens, python_index, 3, &["ty", "check"]))
 }
 
 fn collect_type_checker_manual_items(tokens: &[ParsedToken<'_>]) -> Option<Vec<String>> {
@@ -3276,7 +3266,15 @@ impl<'a> JsonParser<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{json, Value};
+
+    const EVALUATOR_GOLDEN_CASES: &str =
+        include_str!("../tests/fixtures/evaluator-golden-cases.json");
+    const OPTIMIZATION_BENCHMARK_FIXTURE: &str =
+        include_str!("../tests/fixtures/optimization-benchmark.json");
+    const OPTIMIZATION_BENCHMARK_COMMAND: &str =
+        r#"FOO=1 BAR=2 env BAZ="two words" python -m pyright src"#;
+    const OPTIMIZATION_BENCHMARK_ITERATIONS: u64 = 1_000_000;
 
     fn decision_message(command: &str) -> String {
         decision_message_with_rules(command, RuleSet::all())
@@ -3284,6 +3282,40 @@ mod tests {
 
     fn decision_message_with_rules(command: &str, rules: RuleSet) -> String {
         evaluate_command(command, rules).unwrap().message
+    }
+
+    fn load_json_fixture(input: &str) -> Value {
+        serde_json::from_str(input).expect("fixture must be valid JSON")
+    }
+
+    fn golden_cases() -> Vec<(String, RuleSet, Option<String>)> {
+        let fixture = load_json_fixture(EVALUATOR_GOLDEN_CASES);
+        let cases = fixture.as_array().expect("golden fixture must be an array");
+
+        cases
+            .iter()
+            .map(|case| {
+                let object = case.as_object().expect("golden case must be an object");
+                let command = object
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .expect("golden case must include a command")
+                    .to_string();
+                let rules = RuleSet::parse(
+                    object
+                        .get("rules")
+                        .and_then(Value::as_str)
+                        .expect("golden case must include rules"),
+                )
+                .expect("golden case rules must be valid");
+                let expected = object
+                    .get("expected")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string);
+
+                (command, rules, expected)
+            })
+            .collect()
     }
 
     #[test]
@@ -3688,6 +3720,45 @@ mod tests {
 
         let ty_only = decision_message_with_rules("mypy .", RuleSet::only(RuleId::Ty));
         assert!(ty_only.contains("ty check ."));
+    }
+
+    #[test]
+    fn golden_command_evaluations_match_fixture() {
+        for (command, rules, expected) in golden_cases() {
+            let actual = evaluate_command(&command, rules).map(|decision| decision.message);
+            assert_eq!(actual, expected, "fixture mismatch for command: {command}");
+        }
+    }
+
+    #[test]
+    fn optimization_benchmark_fixture_is_stable() {
+        let fixture = load_json_fixture(OPTIMIZATION_BENCHMARK_FIXTURE);
+        let object = fixture
+            .as_object()
+            .expect("benchmark fixture must be an object");
+
+        assert_eq!(
+            object
+                .get("command")
+                .and_then(Value::as_str)
+                .expect("benchmark fixture must include a command"),
+            OPTIMIZATION_BENCHMARK_COMMAND
+        );
+        assert_eq!(
+            object
+                .get("iterations")
+                .and_then(Value::as_u64)
+                .expect("benchmark fixture must include iterations"),
+            OPTIMIZATION_BENCHMARK_ITERATIONS
+        );
+        assert_eq!(
+            object
+                .get("rules")
+                .and_then(Value::as_str)
+                .expect("benchmark fixture must include rules"),
+            RuleSet::all().cli_value()
+        );
+        assert!(evaluate_command(OPTIMIZATION_BENCHMARK_COMMAND, RuleSet::all()).is_some());
     }
 
     #[test]
