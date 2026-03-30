@@ -2813,22 +2813,24 @@ fn is_pip_name(name: &[u8]) -> bool {
 }
 
 fn is_shell_assignment(token: &[u8]) -> bool {
-    let Some(index) = token.iter().position(|byte| *byte == b'=') else {
+    let Some((&first, rest)) = token.split_first() else {
         return false;
     };
-    let head = &token[..index];
 
-    if head.is_empty() {
+    if !(first.is_ascii_alphabetic() || first == b'_') {
         return false;
     }
 
-    if !(head[0].is_ascii_alphabetic() || head[0] == b'_') {
-        return false;
+    for &byte in rest {
+        if byte == b'=' {
+            return true;
+        }
+        if !(byte.is_ascii_alphanumeric() || byte == b'_') {
+            return false;
+        }
     }
 
-    head[1..]
-        .iter()
-        .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+    false
 }
 
 fn configure_claude_hook(
