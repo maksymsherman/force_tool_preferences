@@ -15,4 +15,7 @@ Use preferred CLI tools consistently in this repo.
 - `python -m pytest` -> `uv run python -m pytest`
 - `pip install requests` -> `uv add requests` or `uv pip install requests`
 - `npm run dev` -> `bun run dev`
+- `npm ci` -> `bun install --frozen-lockfile`
+- `npm test` -> `bun run test`
+- `npm init` -> `bun init`
 - `npx prettier .` -> `bunx prettier .`

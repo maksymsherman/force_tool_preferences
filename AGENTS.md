@@ -20,7 +20,12 @@ Combined shell-hook enforcement for preferred CLI tools in agent workflows.
 - `pip uninstall requests` -> `uv remove requests` or `uv pip uninstall requests`
 - `npm install` -> `bun install`
 - `npm install react` -> `bun add react`
+- `npm ci` -> `bun install --frozen-lockfile`
 - `npm run dev` -> `bun run dev`
+- `npm test` -> `bun run test`
+- `npm start` -> `bun run start`
+- `npm init` -> `bun init`
+- `npm link` -> `bun link`
 - `npx prettier .` -> `bunx prettier .`
 
 ## Design notes

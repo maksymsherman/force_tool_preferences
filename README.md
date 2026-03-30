@@ -80,6 +80,10 @@ Common outcomes:
 | `pip uninstall requests` | suggest `uv remove requests` and `uv pip uninstall requests` |
 | `uv init` | blocked with safer `uv` guidance |
 | `npm run dev` | suggest `bun run dev` |
+| `npm ci` | suggest `bun install --frozen-lockfile` |
+| `npm test` | suggest `bun run test` |
+| `npm start` | suggest `bun run start` |
+| `npm init` | suggest `bun init` |
 | `npx prettier .` | suggest `bunx prettier .` |
 | `grep -s TODO file.txt` | blocked for manual translation |
 
@@ -204,8 +208,13 @@ Typical outcomes:
 - `npm install` -> `bun install`
 - `npm install react` -> `bun add react`
 - `npm install --save-dev typescript` -> `bun add -d typescript`
+- `npm ci` -> `bun install --frozen-lockfile`
 - `npm uninstall react` -> `bun remove react`
 - `npm run dev` -> `bun run dev`
+- `npm test` -> `bun run test`
+- `npm start` -> `bun run start`
+- `npm init` -> `bun init`
+- `npm link` -> `bun link`
 - `npm exec vite -- --host` -> `bun vite -- --host`
 - `npm create vite@latest app` -> `bun create vite@latest app`
 - `npm publish dist` -> `bun publish dist`

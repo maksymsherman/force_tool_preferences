@@ -1138,6 +1138,51 @@ fn render_npm_decision(tokens: &[ParsedToken<'_>], command_index: usize) -> Stri
         };
     }
 
+    if subcommand.eq_ignore_ascii_case("ci") {
+        return match rewrite_npm_ci_to_bun(tokens, command_index) {
+            BunRewrite::Exact(suggestion) => {
+                into_exact_suggestion_message(rule_spec(RuleId::Bun).guidance, suggestion)
+            }
+            BunRewrite::NeedsManualTranslation { items, note } => {
+                format_bun_manual_translation_message(rule_spec(RuleId::Bun).guidance, &items, note)
+            }
+        };
+    }
+
+    if matches_npm_lifecycle_subcommand(subcommand) {
+        let script = normalize_npm_lifecycle_name(subcommand);
+        return match rewrite_npm_lifecycle_to_bun(tokens, command_index, script) {
+            BunRewrite::Exact(suggestion) => {
+                into_exact_suggestion_message(rule_spec(RuleId::Bun).guidance, suggestion)
+            }
+            BunRewrite::NeedsManualTranslation { items, note } => {
+                format_bun_manual_translation_message(rule_spec(RuleId::Bun).guidance, &items, note)
+            }
+        };
+    }
+
+    if subcommand.eq_ignore_ascii_case("init") {
+        return match rewrite_npm_init_to_bun(tokens, command_index) {
+            BunRewrite::Exact(suggestion) => {
+                into_exact_suggestion_message(rule_spec(RuleId::Bun).guidance, suggestion)
+            }
+            BunRewrite::NeedsManualTranslation { items, note } => {
+                format_bun_manual_translation_message(rule_spec(RuleId::Bun).guidance, &items, note)
+            }
+        };
+    }
+
+    if subcommand.eq_ignore_ascii_case("link") || subcommand.eq_ignore_ascii_case("ln") {
+        return match rewrite_npm_link_to_bun(tokens, command_index) {
+            BunRewrite::Exact(suggestion) => {
+                into_exact_suggestion_message(rule_spec(RuleId::Bun).guidance, suggestion)
+            }
+            BunRewrite::NeedsManualTranslation { items, note } => {
+                format_bun_manual_translation_message(rule_spec(RuleId::Bun).guidance, &items, note)
+            }
+        };
+    }
+
     format_bun_manual_translation_message(
         rule_spec(RuleId::Bun).guidance,
         &[format!("subcommand: {}", subcommand_token.raw)],
@@ -1340,6 +1385,10 @@ fn rewrite_npm_install_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) 
 
     if exact {
         push_command_part(&mut suggestion, "-E", &mut needs_space);
+    }
+
+    for flag in &passthrough_flags {
+        push_command_part(&mut suggestion, flag, &mut needs_space);
     }
 
     for token in package_args {
@@ -1569,6 +1618,140 @@ fn rewrite_npm_pack_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) -> 
         command_index,
         2,
         &["bun", "pm", "pack"],
+    ))
+}
+
+fn rewrite_npm_ci_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) -> BunRewrite {
+    let args = &tokens[command_index + 2..];
+    let uncertain_items = args
+        .iter()
+        .filter(|token| token.value.starts_with('-'))
+        .map(|token| token.raw.to_string())
+        .collect::<Vec<_>>();
+
+    if !uncertain_items.is_empty() {
+        return BunRewrite::NeedsManualTranslation {
+            items: uncertain_items,
+            note: "Translate npm ci flags manually after checking Bun's install docs instead of guessing.",
+        };
+    }
+
+    BunRewrite::Exact(replace_command(
+        tokens,
+        command_index,
+        2,
+        &["bun", "install", "--frozen-lockfile"],
+    ))
+}
+
+fn matches_npm_lifecycle_subcommand(subcommand: &str) -> bool {
+    subcommand.eq_ignore_ascii_case("test")
+        || subcommand.eq_ignore_ascii_case("t")
+        || subcommand.eq_ignore_ascii_case("tst")
+        || subcommand.eq_ignore_ascii_case("start")
+        || subcommand.eq_ignore_ascii_case("stop")
+        || subcommand.eq_ignore_ascii_case("restart")
+}
+
+fn normalize_npm_lifecycle_name(subcommand: &str) -> &'static str {
+    if subcommand.eq_ignore_ascii_case("test")
+        || subcommand.eq_ignore_ascii_case("t")
+        || subcommand.eq_ignore_ascii_case("tst")
+    {
+        "test"
+    } else if subcommand.eq_ignore_ascii_case("start") {
+        "start"
+    } else if subcommand.eq_ignore_ascii_case("stop") {
+        "stop"
+    } else {
+        "restart"
+    }
+}
+
+fn rewrite_npm_lifecycle_to_bun(
+    tokens: &[ParsedToken<'_>],
+    command_index: usize,
+    script: &'static str,
+) -> BunRewrite {
+    let args = &tokens[command_index + 2..];
+    let mut uncertain_items = Vec::new();
+
+    for token in args {
+        let value = token.value.as_ref();
+        if value == "--" {
+            break;
+        }
+        if value.starts_with('-') {
+            uncertain_items.push(token.raw.to_string());
+        }
+    }
+
+    if !uncertain_items.is_empty() {
+        return BunRewrite::NeedsManualTranslation {
+            items: uncertain_items,
+            note: "Translate npm lifecycle flags manually after checking Bun's script runner docs instead of assuming the same CLI shape.",
+        };
+    }
+
+    BunRewrite::Exact(replace_command(
+        tokens,
+        command_index,
+        2,
+        &["bun", "run", script],
+    ))
+}
+
+fn rewrite_npm_init_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) -> BunRewrite {
+    let args = &tokens[command_index + 2..];
+
+    if args.is_empty() {
+        return BunRewrite::Exact(replace_command(
+            tokens,
+            command_index,
+            2,
+            &["bun", "init"],
+        ));
+    }
+
+    let all_yes = args
+        .iter()
+        .all(|t| matches!(t.value.as_ref(), "-y" | "--yes"));
+    if all_yes {
+        return BunRewrite::Exact(replace_command(
+            tokens,
+            command_index,
+            2 + args.len(),
+            &["bun", "init"],
+        ));
+    }
+
+    let items = args.iter().map(|t| t.raw.to_string()).collect::<Vec<_>>();
+    BunRewrite::NeedsManualTranslation {
+        items,
+        note: "Translate npm init arguments manually. `bun init` creates a new project; for template scaffolding use `bun create` instead.",
+    }
+}
+
+fn rewrite_npm_link_to_bun(tokens: &[ParsedToken<'_>], command_index: usize) -> BunRewrite {
+    let args = &tokens[command_index + 2..];
+    let uncertain_items = args
+        .iter()
+        .filter(|token| token.value.starts_with('-'))
+        .map(|token| token.raw.to_string())
+        .collect::<Vec<_>>();
+
+    if !uncertain_items.is_empty() {
+        return BunRewrite::NeedsManualTranslation {
+            items: uncertain_items,
+            note: "Translate npm link flags manually after checking `bun link --help` instead of guessing.",
+        };
+    }
+
+    BunRewrite::Exact(replace_command(
+        tokens,
+        command_index,
+        2,
+        &["bun", "link"],
     ))
 }
 
@@ -2813,13 +2996,44 @@ mod tests {
 
         let npx = decision_message("npx prettier .");
         assert!(npx.contains("bunx prettier ."));
+
+        let ci = decision_message("npm ci");
+        assert!(ci.contains("bun install --frozen-lockfile"));
+
+        let test = decision_message("npm test");
+        assert!(test.contains("bun run test"));
+
+        let t = decision_message("npm t");
+        assert!(t.contains("bun run test"));
+
+        let start = decision_message("npm start");
+        assert!(start.contains("bun run start"));
+
+        let stop = decision_message("npm stop");
+        assert!(stop.contains("bun run stop"));
+
+        let restart = decision_message("npm restart");
+        assert!(restart.contains("bun run restart"));
+
+        let init = decision_message("npm init");
+        assert!(init.contains("bun init"));
+
+        let init_y = decision_message("npm init -y");
+        assert!(init_y.contains("bun init"));
+        assert!(!init_y.contains("-y"));
+
+        let link = decision_message("npm link");
+        assert!(link.contains("bun link"));
+
+        let link_pkg = decision_message("npm link my-package");
+        assert!(link_pkg.contains("bun link my-package"));
+
+        let add_dry_run = decision_message("npm install --dry-run react");
+        assert!(add_dry_run.contains("bun add --dry-run react"));
     }
 
     #[test]
     fn requires_manual_translation_for_uncertain_bun_mappings() {
-        let ci = decision_message("npm ci");
-        assert!(ci.contains("subcommand: ci"));
-        assert!(ci.contains("Translate this npm workflow manually"));
 
         let npx = decision_message("npx --yes create-vite");
         assert!(npx.contains("manual translation"));
@@ -2828,6 +3042,15 @@ mod tests {
         let exec = decision_message("npm exec @scope/tool");
         assert!(exec.contains("@scope/tool"));
         assert!(exec.contains("whether the Bun equivalent should be `bun` or `bunx`"));
+
+        let init_template = decision_message("npm init react-app my-app");
+        assert!(init_template.contains("bun create"));
+
+        let link_flags = decision_message("npm link --save");
+        assert!(link_flags.contains("manual translation"));
+
+        let test_flags = decision_message("npm test --ignore-scripts");
+        assert!(test_flags.contains("manual translation"));
     }
 
     #[test]
